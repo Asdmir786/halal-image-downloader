@@ -125,14 +125,14 @@ hi-dlp "URL" --quiet
 ### Date Filtering
 
 ```bash
-# Download images from specific date
-hi-dlp "URL" --date 20250914
+# Download images from specific date (YYYYMMDD)
+hi-dlp "URL" --date YYYYMMDD
 
-# Download images after specific date
-hi-dlp "URL" --dateafter 20250901
+# Download images after specific date (YYYYMMDD)
+hi-dlp "URL" --dateafter YYYYMMDD
 
-# Download images before specific date
-hi-dlp "URL" --datebefore 20250930
+# Download images before specific date (YYYYMMDD)
+hi-dlp "URL" --datebefore YYYYMMDD
 ```
 
 ## Command Line Options

@@ -534,8 +534,8 @@ def main() -> None:
     if not args.url:
         parser.error("URL is required")
     
-    # Print configuration for now (avoid displaying version banner to remove date references in runtime output)
-    print("halal-image-downloader")
+    # Print configuration for now
+    print(f"halal-image-downloader {__version__}")
     print(f"URL: {args.url}")
     
     if args.verbose:
