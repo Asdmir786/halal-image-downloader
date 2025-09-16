@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 from typing import List, Optional
 from .extractors.instagram import InstagramExtractor
+from .extractors.pinterest import PinterestExtractor
 from . import __version__
 
 
@@ -578,8 +579,48 @@ def main() -> None:
                 print("❌ No images were downloaded")
                 print(f"\n⏱ Total time: {elapsed:.2f}s")
                 sys.exit(1)
+        elif "pinterest.com" in args.url:
+            print("Detected Pinterest URL")
+            output_dir = Path(args.output).expanduser() if args.output else Path('.')
+            if args.verbose:
+                print(f"Output directory: {output_dir.resolve()}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            start_ts = time.perf_counter()
+            extractor = PinterestExtractor()
+            # Extract only images (videos auto-skipped inside the extractor)
+            images = extractor.extract_images(args.url)
+
+            if not images:
+                print("❌ No downloadable images found on this Pin (it may be video-only or unavailable).")
+                sys.exit(1)
+
+            saved: List[Path] = []
+            if args.skip_download:
+                print("--skip-download specified; listing images only:")
+                for item in images:
+                    print(f"  🖼  {item['url']} -> {item['filename']}")
+            else:
+                for item in images:
+                    dest = output_dir / item['filename']
+                    ok = extractor.download_image(item['url'], str(dest))
+                    if ok:
+                        saved.append(dest)
+                    else:
+                        print(f"⚠️  Failed to download {item['url']}")
+
+            elapsed = time.perf_counter() - start_ts
+            if saved:
+                print(f"\n✅ Successfully downloaded {len(saved)} image(s):")
+                for p in saved:
+                    print(f"  📁 {p}")
+                print(f"\n⏱ Total time: {elapsed:.2f}s")
+            else:
+                print("❌ No images were downloaded")
+                print(f"\n⏱ Total time: {elapsed:.2f}s")
+                sys.exit(1)
         else:
-            print("❌ Unsupported platform. Currently only Instagram is supported.")
+            print("❌ Unsupported platform. Currently only Instagram and Pinterest are supported.")
             sys.exit(1)
             
     except Exception as e:
