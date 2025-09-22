@@ -11,14 +11,30 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from .base_extractor import (
+    BaseExtractor, logger,
+    ExtractorError, TemporaryError, PermanentError,
+    RateLimitError, ServiceUnavailableError, InvalidUrlError, NetworkError
+)
 
-class PinterestExtractor:
+
+class PinterestExtractor(BaseExtractor):
     """Extractor for Pinterest content."""
     
-    def __init__(self):
+    def __init__(self, max_retries: int = 3):
+        # Initialize base extractor
+        super().__init__(max_retries=max_retries)
+        
+        # Pinterest-specific settings
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         })
     
     @staticmethod
@@ -32,6 +48,7 @@ class PinterestExtractor:
         
         return any(re.match(pattern, url) for pattern in pinterest_patterns)
     
+    
     def extract_pin_id(self, url: str) -> Optional[str]:
         """Extract pin ID from Pinterest URL."""
         match = re.search(r'/pin/([0-9]+)', url)
@@ -41,10 +58,22 @@ class PinterestExtractor:
     # Fetch and parse utils
     # --------------------
 
+    def _fetch_html_impl(self, url: str) -> str:
+        """Implementation of HTML fetching (without retry logic)."""
+        # Use fresh user agent for each request
+        headers = self.get_fresh_headers(self.session.headers)
+        
+        try:
+            resp = self.session.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp.text
+        except requests.exceptions.RequestException as e:
+            # Let the classify_error method handle the specific error type
+            raise
+    
     def _fetch_html(self, url: str) -> str:
-        resp = self.session.get(url, timeout=30)
-        resp.raise_for_status()
-        return resp.text
+        """Fetch HTML with retry logic."""
+        return self.retry_with_backoff_sync(self._fetch_html_impl, url)
 
     def _extract_meta_signals(self, soup: BeautifulSoup) -> Dict[str, Any]:
         """Extract key OpenGraph/Twitter meta signals for type detection."""
@@ -226,36 +255,41 @@ class PinterestExtractor:
         return results
     
     def get_pin_info(self, url: str) -> Dict[str, Any]:
-        """Extract basic information about the Pinterest pin."""
+        """Extract basic information about the Pinterest pin with error handling."""
         if not self.is_valid_url(url):
-            raise ValueError(f"Invalid Pinterest URL: {url}")
+            raise InvalidUrlError(f"Invalid Pinterest URL format: {url}")
 
         pin_id = self.extract_pin_id(url)
         if not pin_id:
             # Handle board/profile URLs
             pin_id = self._generate_id_from_url(url)
 
-        # Fetch page to populate metadata (best-effort)
-        html = self._fetch_html(url)
-        soup = BeautifulSoup(html, 'html.parser')
-        title = soup.title.string.strip() if soup.title and soup.title.string else f'Pinterest Pin {pin_id}'
-        desc_meta = soup.find('meta', attrs={'name': 'description'})
-        description = desc_meta.get('content') if desc_meta else None
+        try:
+            # Fetch page to populate metadata (best-effort)
+            html = self._fetch_html(url)
+            soup = BeautifulSoup(html, 'html.parser')
+            title = soup.title.string.strip() if soup.title and soup.title.string else f'Pinterest Pin {pin_id}'
+            desc_meta = soup.find('meta', attrs={'name': 'description'})
+            description = desc_meta.get('content') if desc_meta else None
 
-        return {
-            'id': pin_id,
-            'url': url,
-            'title': title,
-            'uploader': 'unknown',
-            'upload_date': None,
-            'description': description,
-            'images': [],
-            'thumbnail': None,
-            'board_name': None,
-            'save_count': None,
-            'comment_count': None,
-            'html': html,
-        }
+            return {
+                'id': pin_id,
+                'url': url,
+                'title': title,
+                'uploader': 'unknown',
+                'upload_date': None,
+                'description': description,
+                'images': [],
+                'thumbnail': None,
+                'board_name': None,
+                'save_count': None,
+                'comment_count': None,
+                'html': html,
+            }
+        except Exception as e:
+            logger.error(f"Error fetching pin info for {url}: {e}")
+            # Re-raise to be handled by retry mechanism
+            raise
     
     def _generate_id_from_url(self, url: str) -> str:
         """Generate an ID from Pinterest URL for non-pin URLs."""
@@ -264,10 +298,17 @@ class PinterestExtractor:
         return '_'.join(path_parts) if path_parts else 'pinterest_content'
     
     def extract_images(self, url: str) -> List[Dict[str, Any]]:
-        """Extract image URLs and metadata from Pinterest pin."""
-        pin_info = self.get_pin_info(url)
-        html = pin_info.get('html') or self._fetch_html(url)
-        soup = BeautifulSoup(html, 'html.parser')
+        """Extract image URLs and metadata from Pinterest pin with comprehensive error handling."""
+        try:
+            pin_info = self.retry_with_backoff_sync(self.get_pin_info, url)
+            html = pin_info.get('html') or self._fetch_html(url)
+            soup = BeautifulSoup(html, 'html.parser')
+        except PermanentError as e:
+            logger.error(f"Permanent error extracting from {url}: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting images from {url}: {e}")
+            return []
 
         # 1) Quick meta rejection only if pure-video and no image fallback is possible
         metas = self._extract_meta_signals(soup)
@@ -396,9 +437,20 @@ class PinterestExtractor:
         return []
     
     def download_image(self, image_url: str, output_path: str) -> bool:
-        """Download a single image from Pinterest."""
+        """Download a single image from Pinterest with retry logic."""
         try:
-            response = self.session.get(image_url, stream=True)
+            return self.retry_with_backoff_sync(self._download_image_impl, image_url, output_path)
+        except Exception as e:
+            logger.error(f"Failed to download image after all retries: {e}")
+            return False
+    
+    def _download_image_impl(self, image_url: str, output_path: str) -> bool:
+        """Implementation of image downloading (without retry logic)."""
+        try:
+            # Use fresh user agent for each request
+            headers = self.get_fresh_headers(self.session.headers)
+            
+            response = self.session.get(image_url, headers=headers, stream=True, timeout=30)
             response.raise_for_status()
             
             with open(output_path, 'wb') as f:
@@ -407,8 +459,13 @@ class PinterestExtractor:
             
             return True
         except Exception as e:
-            print(f"Error downloading image: {e}")
-            return False
+            logger.error(f"Error downloading image: {e}")
+            # Re-raise to be handled by retry mechanism
+            raise
+    
+    def extract(self, url: str) -> List[Dict[str, Any]]:
+        """Main extraction method - implements BaseExtractor abstract method."""
+        return self.extract_images(url)
     
     def search_pins(self, query: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Search for pins based on a query."""

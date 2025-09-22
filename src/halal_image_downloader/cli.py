@@ -10,6 +10,7 @@ import time
 from typing import List, Optional, cast
 from .extractors.instagram import InstagramExtractor
 from .extractors.pinterest import PinterestExtractor
+from .extractors.reddit import RedditExtractor
 from . import __version__
 import os
 import re
@@ -25,8 +26,9 @@ def create_parser() -> argparse.ArgumentParser:
         epilog='''
 Examples:
   halal-image-downloader "https://instagram.com/p/ABC123"
-  halal-image-downloader "https://twitter.com/user/status/123" -o ~/Downloads
-  halal-image-downloader "https://example.com/post" --format jpg --quality best
+  halal-image-downloader "https://pinterest.com/pin/123456789"
+  halal-image-downloader "https://reddit.com/r/EarthPorn/comments/abc123/beautiful_sunset" -o ~/Downloads
+  halal-image-downloader "https://reddit.com/r/Art" --format jpg --quality best
         '''
     )
     
@@ -236,6 +238,11 @@ Examples:
              'or a simple readable format using tokens: author, title, date, id, ext. ' \
              'Special path rules: leading "/" = home, "./" = cwd, "../" = parent. ' \
              'If filename has no extension, ".%(ext)s" is appended automatically.')
+    )
+    filesystem.add_argument(
+        '-E', '--ensure-output-dir',
+        action='store_true',
+        help='Ensure the output directory (and parents) exists by creating it if missing. Default: error if missing.'
     )
     filesystem.add_argument(
         '--output-na-placeholder',
@@ -541,7 +548,7 @@ def _resolve_output_dir(output: Optional[str]) -> Path:
     return out_dir
 
 
-def _parse_output_option(output: Optional[str]) -> tuple[str, Path]:
+def _parse_output_option(output: Optional[str], create_dirs: bool = True) -> tuple[str, Path]:
     """
     Parse -o/--output value and return (output_template, output_dir).
 
@@ -557,12 +564,17 @@ def _parse_output_option(output: Optional[str]) -> tuple[str, Path]:
     - If the filename part lacks an extension, append '.%(ext)s'.
     - If the path resolves to a directory (ends with separator or looks like a
       directory) use default filename '%(title)s.%(ext)s'.
+    Parameters:
+    - create_dirs: when True, ensure the resolved output directory exists. Set to False to avoid
+      side-effects (e.g., in --simulate mode).
+
     """
     default_filename = "%(title)s.%(ext)s"
     # No output provided -> cwd + default name
     if not output:
         out_dir = Path('.').resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
+        if create_dirs:
+            out_dir.mkdir(parents=True, exist_ok=True)
         return default_filename, out_dir
 
     raw = output
@@ -589,7 +601,8 @@ def _parse_output_option(output: Optional[str]) -> tuple[str, Path]:
     if '%(' in raw or '%(' in expanded or '{' in raw or '{' in expanded:
         out_template = str(cand)
         out_dir = cand.parent if cand.name else cand
-        out_dir.mkdir(parents=True, exist_ok=True)
+        if create_dirs:
+            out_dir.mkdir(parents=True, exist_ok=True)
         return out_template, out_dir
 
     # Convert path to forward-slash style for token processing
@@ -642,7 +655,17 @@ def _parse_output_option(output: Optional[str]) -> tuple[str, Path]:
         raise
 
     # Determine if candidate is directory-like
-    is_dir_like = raw.endswith('/') or raw.endswith('\\') or (cand.exists() and cand.is_dir()) or name_part == ''
+    # Treat as directory when:
+    # - ends with path separator
+    # - exists as a directory
+    # - has empty name part (path ends with separator)
+    # - or, it does not exist yet and the last segment has no dot (no extension)
+    is_dir_like = (
+        raw.endswith('/') or raw.endswith('\\') or
+        (cand.exists() and cand.is_dir()) or
+        name_part == '' or
+        (not cand.exists() and '.' not in name_part)
+    )
     if is_dir_like:
         out_dir = cand
         filename = default_filename
@@ -653,7 +676,8 @@ def _parse_output_option(output: Optional[str]) -> tuple[str, Path]:
         if '.' not in filename:
             filename = filename + '.%(ext)s'
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if create_dirs:
+        out_dir.mkdir(parents=True, exist_ok=True)
     out_template = str(Path(out_dir) / filename)
     return out_template, out_dir
 
@@ -676,8 +700,10 @@ def main() -> None:
     # Handle simulation mode
     if args.simulate:
         print(f"[simulate] Would download from: {args.url}")
-        if args.output:
-            print(f"[simulate] Output template: {args.output}")
+        # Resolve output without creating directories in simulate mode
+        out_template, out_dir = _parse_output_option(args.output, create_dirs=False)
+        print(f"[simulate] Output directory (absolute): {out_dir}")
+        print(f"[simulate] Output template (absolute): {out_template}")
         if args.format:
             print(f"[simulate] Format: {args.format}")
         if args.quality:
@@ -688,16 +714,20 @@ def main() -> None:
     if not args.url:
         parser.error("URL is required")
     
+    # Resolve output (absolute) respecting --ensure-output-dir and validate existence when not set
+    out_template, out_dir = _parse_output_option(args.output, create_dirs=bool(getattr(args, 'ensure_output_dir', False)))
+    if not out_dir.exists():
+        parser.error(f"Output directory does not exist: {out_dir}. Use --ensure-output-dir to create it.")
+
     # Print configuration for now
     print(f"halal-image-downloader {__version__}")
     print(f"URL: {args.url}")
-    
+    print(f"Output directory (absolute): {out_dir}")
+    print(f"Output template (absolute): {out_template}")
+
     if args.verbose:
         print("Verbose mode enabled")
         print(f"Arguments: {vars(args)}")
-    
-    if args.output:
-        print(f"Output: {args.output}")
     
     if args.format:
         print(f"Format: {args.format}")
@@ -710,11 +740,12 @@ def main() -> None:
         if "instagram.com" in args.url:
             print("Detected Instagram URL")
             headless = not args.debug_browser
-            output_dir = _resolve_output_dir(args.output)
+            # Use the already resolved absolute output directory
+            output_dir = out_dir
             if args.verbose:
                 print(f"Browser mode: {'headless' if headless else 'visible (debug)'}")
                 print(f"Browser engine: {args.browser}")
-                print(f"Output directory: {output_dir.resolve()}")
+                print(f"Output directory (absolute): {output_dir}")
             # Timer start
             start_ts = time.perf_counter()
             downloaded_files: List[Path] = []
@@ -726,7 +757,11 @@ def main() -> None:
             if downloaded_files:
                 print(f"\n✅ Successfully downloaded {len(downloaded_files)} image(s):")
                 for file_path in downloaded_files:
-                    print(f"  📁 {file_path}")
+                    # Ensure printed paths are absolute
+                    try:
+                        print(f"  📁 {Path(file_path).resolve()}")
+                    except Exception:
+                        print(f"  📁 {file_path}")
                 print(f"\n⏱ Total time: {elapsed:.2f}s")
             else:
                 print("❌ No images were downloaded")
@@ -734,9 +769,10 @@ def main() -> None:
                 sys.exit(1)
         elif "pinterest.com" in args.url:
             print("Detected Pinterest URL")
-            output_dir = _resolve_output_dir(args.output)
+            # Use the already resolved absolute output directory
+            output_dir = out_dir
             if args.verbose:
-                print(f"Output directory: {output_dir.resolve()}")
+                print(f"Output directory (absolute): {output_dir}")
 
             start_ts = time.perf_counter()
             extractor = PinterestExtractor()
@@ -765,14 +801,60 @@ def main() -> None:
             if saved:
                 print(f"\n✅ Successfully downloaded {len(saved)} image(s):")
                 for p in saved:
-                    print(f"  📁 {p}")
+                    try:
+                        print(f"  📁 {p.resolve()}")
+                    except Exception:
+                        print(f"  📁 {p}")
+                print(f"\n⏱ Total time: {elapsed:.2f}s")
+            else:
+                print("❌ No images were downloaded")
+                print(f"\n⏱ Total time: {elapsed:.2f}s")
+                sys.exit(1)
+        elif "reddit.com" in args.url:
+            print("Detected Reddit URL")
+            # Use the already resolved absolute output directory
+            output_dir = out_dir
+            if args.verbose:
+                print(f"Output directory (absolute): {output_dir}")
+
+            start_ts = time.perf_counter()
+            extractor = RedditExtractor()
+            # Extract images from Reddit post or subreddit
+            images = extractor.extract(args.url)
+
+            if not images:
+                print("❌ No downloadable images found on this Reddit post/subreddit.")
+                sys.exit(1)
+
+            saved: List[Path] = []
+            if args.skip_download:
+                print("--skip-download specified; listing images only:")
+                for item in images:
+                    print(f"  🖼  {item['url']} -> {item['filename']}")
+            else:
+                for item in images:
+                    dest = output_dir / item['filename']
+                    ok = extractor.download_image(item['url'], str(dest))
+                    if ok:
+                        saved.append(dest)
+                    else:
+                        print(f"⚠️  Failed to download {item['url']}")
+
+            elapsed = time.perf_counter() - start_ts
+            if saved:
+                print(f"\n✅ Successfully downloaded {len(saved)} image(s):")
+                for p in saved:
+                    try:
+                        print(f"  📁 {p.resolve()}")
+                    except Exception:
+                        print(f"  📁 {p}")
                 print(f"\n⏱ Total time: {elapsed:.2f}s")
             else:
                 print("❌ No images were downloaded")
                 print(f"\n⏱ Total time: {elapsed:.2f}s")
                 sys.exit(1)
         else:
-            print("❌ Unsupported platform. Currently only Instagram and Pinterest are supported.")
+            print("❌ Unsupported platform. Currently Instagram, Pinterest, and Reddit are supported.")
             sys.exit(1)
             
     except Exception as e:

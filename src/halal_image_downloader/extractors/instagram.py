@@ -7,22 +7,28 @@ Extracts images from Instagram posts using SaveClip.app service with Playwright 
 import asyncio
 import os
 import re
-import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
 import httpx
-from fake_useragent import UserAgent
 from playwright.async_api import async_playwright
 
-class InstagramExtractor:
-    def __init__(self, output_dir=".", headless: bool = True, debug_wait_seconds: float = 0.0, browser: str = "firefox"):
+from .base_extractor import (
+    BaseExtractor, logger,
+    ExtractorError, TemporaryError, PermanentError,
+    RateLimitError, ServiceUnavailableError, InvalidUrlError, NetworkError
+)
+
+class InstagramExtractor(BaseExtractor):
+    def __init__(self, output_dir=".", headless: bool = True, debug_wait_seconds: float = 0.0, browser: str = "firefox", max_retries: int = 3):
+        # Initialize base extractor
+        super().__init__(max_retries=max_retries)
+        
+        # Instagram-specific settings
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
-        # Initialize fake user agent
-        self.ua = UserAgent()
         self.headless = headless
         self.debug_wait_ms = int(max(0.0, debug_wait_seconds) * 1000)
         self.browser_engine = (browser or "firefox").strip().lower()
@@ -39,27 +45,31 @@ class InstagramExtractor:
             'Upgrade-Insecure-Requests': '1',
         }
     
+    @staticmethod
+    def is_valid_url(url: str) -> bool:
+        """Check if the URL is a valid Instagram URL."""
+        instagram_patterns = [
+            r'https?://(?:www\.)?instagram\.com/p/[A-Za-z0-9_-]+/?',
+            r'https?://(?:www\.)?instagram\.com/reel/[A-Za-z0-9_-]+/?',
+        ]
+        return any(re.match(pattern, url) for pattern in instagram_patterns)
+    
     def extract_post_id(self, url):
         """Extract post ID from Instagram URL."""
         # Match patterns like /p/POST_ID/ or /reel/POST_ID/
         match = re.search(r'/(?:p|reel)/([A-Za-z0-9_-]+)/', url)
         return match.group(1) if match else None
     
-    def sanitize_filename(self, filename):
-        """Sanitize filename for safe file system usage."""
-        # Remove or replace invalid characters
-        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-        # Remove extra spaces and dots
-        filename = re.sub(r'\s+', '_', filename)
-        filename = filename.strip('.')
-        return filename
     
     def download_image(self, image_url, filename):
-        """Download an image from URL."""
+        """Download an image from URL with retry logic."""
+        return self.retry_with_backoff_sync(self._download_image_impl, image_url, filename)
+    
+    def _download_image_impl(self, image_url, filename):
+        """Implementation of image downloading (without retry logic)."""
         try:
             # Use fresh user agent for each request
-            headers = self.headers.copy()
-            headers['User-Agent'] = self.ua.random
+            headers = self.get_fresh_headers(self.headers)
             
             with httpx.stream('GET', image_url, headers=headers, timeout=30) as response:
                 response.raise_for_status()
@@ -72,11 +82,12 @@ class InstagramExtractor:
             return filepath
             
         except Exception as e:
-            print(f"Error downloading image {image_url}: {e}")
-            return None
+            logger.error(f"Error downloading image {image_url}: {e}")
+            # Re-raise to be handled by retry mechanism
+            raise
     
-    async def extract_with_saveclip(self, instagram_url):
-        """Extract images using SaveClip.app service."""
+    async def _extract_with_saveclip_impl(self, instagram_url):
+        """Implementation of SaveClip extraction (without retry logic)."""
         async with async_playwright() as p:
             browser = None
             try:
@@ -106,7 +117,10 @@ class InstagramExtractor:
                 try:
                     await page.goto("https://saveclip.app/en", wait_until="domcontentloaded", timeout=8000)
                 except Exception as e:
-                    raise Exception(f"Failed to load SaveClip.app: {e}")
+                    # Check if it's a network error
+                    if any(keyword in str(e).lower() for keyword in ['net::', 'timeout', 'connection']):
+                        raise NetworkError(f"Failed to connect to SaveClip.app: {e}")
+                    raise ServiceUnavailableError(f"SaveClip.app is unavailable: {e}")
                 
                 # Handle potential cookie/consent banners and ads (best-effort)
                 try:
@@ -278,7 +292,16 @@ class InstagramExtractor:
                         print(f"Diagnostic collection failed: {diag_error}")
                     
                     print("=== END DIAGNOSTIC INFO ===\n")
-                    raise Exception("No matching 'Download Image' links found on SaveClip page")
+                    
+                    # Classify the error based on diagnostic info
+                    if "rate limit" in body_text.lower():
+                        raise RateLimitError("SaveClip.app rate limit detected")
+                    elif "blocked" in body_text.lower():
+                        raise RateLimitError("Request blocked by SaveClip.app")
+                    elif "private" in body_text.lower() or "not found" in body_text.lower():
+                        raise InvalidUrlError("Instagram post is private or not found")
+                    else:
+                        raise ServiceUnavailableError("No matching 'Download Image' links found on SaveClip page")
                 
                 print(f"Found {len(matched_links)} items to process...")
                 
@@ -311,6 +334,7 @@ class InstagramExtractor:
                             name, ext = os.path.splitext(safe_filename)
                             final_filename = f"{name}_{timestamp}{ext}"
                             
+
                         except:
                             # Fallback filename
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -333,18 +357,21 @@ class InstagramExtractor:
                 
                 for i, (download_url, filename) in enumerate(image_downloads, 1):
                     print(f"Downloading image {i}/{len(image_downloads)}: {filename}")
-                    filepath = self.download_image(download_url, filename)
-                    
-                    if filepath:
-                        downloaded_files.append(filepath)
-                        print(f"✓ Downloaded: {filepath}")
-                    else:
-                        print(f"✗ Failed to download image {i}")
+                    try:
+                        filepath = self.download_image(download_url, filename)
+                        if filepath:
+                            downloaded_files.append(filepath)
+                            print(f"✓ Downloaded: {filepath}")
+                        else:
+                            print(f"✗ Failed to download image {i}")
+                    except Exception as e:
+                        logger.error(f"Failed to download image {i}: {e}")
+                        print(f"✗ Failed to download image {i}: {e}")
                 
                 return downloaded_files
                 
             except Exception as e:
-                print(f"Error during SaveClip extraction: {e}")
+                logger.error(f"Error during SaveClip extraction: {e}")
                 if browser:
                     if not self.headless and self.debug_wait_ms > 0:
                         try:
@@ -353,23 +380,35 @@ class InstagramExtractor:
                         except Exception:
                             pass
                     await browser.close()
-                return []
+                # Re-raise the exception to be handled by retry mechanism
+                raise
+    
+    async def extract_with_saveclip(self, instagram_url):
+        """Extract images using SaveClip.app service with retry logic."""
+        return await self.retry_with_backoff_async(self._extract_with_saveclip_impl, instagram_url)
     
     def extract(self, url):
-        """Main extraction method."""
+        """Main extraction method with comprehensive error handling."""
         post_id = self.extract_post_id(url)
         if not post_id:
-            print(f"Error: Could not extract post ID from URL: {url}")
-            return []
+            logger.error(f"Could not extract post ID from URL: {url}")
+            raise InvalidUrlError(f"Invalid Instagram URL format: {url}")
         
-        print(f"Extracting images from Instagram post: {post_id}")
-        print(f"Using SaveClip.app service...")
+        logger.info(f"Extracting images from Instagram post: {post_id}")
+        logger.info(f"Using SaveClip.app service with retry mechanism...")
         
         try:
-            # Run the async extraction
-            downloaded_files = asyncio.run(self.extract_with_saveclip(url))
-            return downloaded_files
+            # Run the async extraction with retry logic
+            result_files = asyncio.run(self.extract_with_saveclip(url))
+            logger.info(f"Successfully extracted {len(result_files)} image(s)")
+            return result_files
             
+        except PermanentError as e:
+            logger.error(f"Permanent error - not retrying: {e}")
+            return []
+        except (RateLimitError, ServiceUnavailableError, NetworkError) as e:
+            logger.error(f"Temporary error - all retries exhausted: {e}")
+            return []
         except Exception as e:
-            print(f"Error during extraction: {e}")
+            logger.error(f"Unexpected error during extraction: {e}")
             return []

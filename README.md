@@ -2,7 +2,7 @@
 
 A command-line tool for fast and reliable image downloading from supported social media sources.
 
-[![Version](https://img.shields.io/badge/version-2025.09.22-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
+[![Version](https://img.shields.io/badge/version-2025.09.23-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
 [![Python](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](LICENSE)
 
@@ -14,7 +14,7 @@ A command-line tool for fast and reliable image downloading from supported socia
 
 - 🚀 **Fast downloads** with concurrent processing
 - 🎯 **Multiple format support** (JPG, PNG, WebP, original)
-- 📱 **Social media platform support** (Instagram, Twitter, etc.)
+- 📱 **Social media platform support** (Instagram, Pinterest, Reddit)
 - 🔄 **Carousel/album downloading** with selective item support
 - 📊 **Quality selection** (best, worst, original, custom resolution)
 - 🛡️ **Authentication support** (cookies, login credentials)
@@ -65,6 +65,12 @@ halal-image-downloader "https://instagram.com/p/ABC123"
 # Download to specific directory
 hi-dlp "https://instagram.com/p/ABC123" -o ~/Downloads
 
+# Download Reddit images
+hi-dlp "https://reddit.com/r/ABC/comments/abc123/beautiful_sunset"
+
+# Download Pinterest pins
+hi-dlp "https://pinterest.com/pin/123456789"
+
 # Download with specific format and quality
 hi-dlp "https://instagram.com/p/ABC123" --format jpg --quality best
 
@@ -80,8 +86,14 @@ hi-dlp "https://instagram.com/p/ABC123" --simulate
 # Download all images from a post
 hi-dlp "https://instagram.com/p/ABC123"
 
+# Download Reddit post images
+hi-dlp "https://reddit.com/r/Art/comments/xyz123/my_latest_artwork"
+
+# Download Pinterest pin
+hi-dlp "https://pinterest.com/pin/987654321"
+
 # Download with custom output directory
-hi-dlp "https://twitter.com/user/status/123" -o ./downloads
+hi-dlp "https://reddit.com/r/Art" -o ./downloads
 
 # Download specific items from carousel (items 1, 3, and 5-10)
 hi-dlp "https://instagram.com/p/ABC123" --playlist-items "1,3,5-10"
@@ -140,7 +152,7 @@ hi-dlp "URL" --datebefore YYYYMMDD
 ### General Options
 - `--version` - Show version and exit
 - `-U, --update` - Update to latest version
-- `-v, --verbose` - Enable verbose output
+- `-V, --verbose` - Enable verbose output
 - `-q, --quiet` - Enable quiet mode
 - `-s, --simulate` - Simulate download without actually downloading
 
@@ -181,11 +193,31 @@ halal-image-downloader --help
 
 ## Supported Platforms
 
-- 📸 **Instagram** - Posts, stories, reels, carousels
-- 🐦 **Twitter/X** - Tweet images, media galleries
-- 📘 **Facebook** - Public posts and images
-- 🎵 **TikTok** - Video thumbnails and covers
+- 📸 **Instagram** - Posts, carousels, galleries (images only, videos skipped)
+- 📌 **Pinterest** - Pins, image boards (images only, videos skipped)
+- 🤖 **Reddit** - Post images, galleries, subreddit images (pure image content)
 - 🔗 **Generic** - Direct image URLs
+
+### Platform-Specific Features
+
+#### Instagram
+- ✅ Single image posts
+- ✅ Multi-image carousels
+- ✅ High-resolution downloads
+- ❌ Videos/Reels (automatically skipped)
+
+#### Pinterest
+- ✅ Individual pins
+- ✅ Image boards
+- ✅ Multiple resolutions
+- ❌ Video pins (automatically skipped)
+
+#### Reddit
+- ✅ Post images (single and galleries)
+- ✅ Subreddit browsing
+- ✅ Mixed media handling (user choice)
+- ❌ Videos (automatically skipped)
+- 🎛️ **Interactive prompts** for mixed media galleries
 
 *More platforms will be added in future releases*
 
@@ -201,6 +233,26 @@ hi-dlp "URL" -o "%(uploader)s/%(title)s.%(ext)s"
 
 # Date-based organization
 hi-dlp "URL" -o "%(upload_date)s/%(id)s.%(ext)s"
+```
+
+### Reddit Mixed Media Handling
+
+When downloading from Reddit, the tool automatically detects mixed media galleries:
+
+```bash
+# If a Reddit gallery contains both images and videos:
+⚠️  Mixed media gallery detected!
+📝 Post: Cool Art and Animation Mix
+🖼️  Images: 3
+🎥 Videos/Animations: 2
+
+This gallery contains both images and videos.
+halal-image-downloader only downloads images.
+
+Choose an option:
+[C]ontinue (download images only)
+[Q]uit program
+Your choice (C/Q):
 ```
 
 ### Simple output templates (easy mode)
@@ -298,10 +350,12 @@ halal-image-downloader/
 │   └── halal_image_downloader/
 │       ├── __init__.py
 │       ├── cli.py              # Command-line interface
-│       ├── downloader.py       # Core download logic
-│       ├── extractors/         # Platform-specific extractors
-│       ├── postprocessor.py    # Image processing
-│       └── utils.py            # Utility functions
+│       └── extractors/         # Platform-specific extractors
+│           ├── __init__.py
+│           ├── base_extractor.py  # Shared functionality
+│           ├── instagram.py       # Instagram extractor
+│           ├── pinterest.py       # Pinterest extractor
+│           └── reddit.py          # Reddit extractor
 ├── tests/                      # Test suite
 ├── pyproject.toml             # Project configuration
 ├── uv.lock                    # Dependency lock file
