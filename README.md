@@ -2,7 +2,7 @@
 
 A command-line tool for fast and reliable image downloading from supported social media sources.
 
-[![Version](https://img.shields.io/badge/version-2025.09.15-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
+[![Version](https://img.shields.io/badge/version-2025.09.22-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
 [![Python](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](LICENSE)
 
@@ -203,6 +203,44 @@ hi-dlp "URL" -o "%(uploader)s/%(title)s.%(ext)s"
 hi-dlp "URL" -o "%(upload_date)s/%(id)s.%(ext)s"
 ```
 
+### Simple output templates (easy mode)
+
+For quick, memorable templates you can use a simple readable format instead of the full `%(...)s` style. The simple format supports:
+
+- Tokens: `author`, `title`, `date`, `id`, `ext`, `idx`, `cnt`
+  - `author` -> `%(uploader)s`
+  - `title`  -> `%(title)s`
+  - `date`   -> `%(upload_date)s`
+  - `id`     -> `%(id)s`
+  - `ext`    -> `%(ext)s`
+  - `idx`    -> `%(playlist_index)s`
+  - `cnt`    -> `%(autonumber)s`
+
+- Path rules:
+  - Leading `/` or `\` is treated as your home directory (e.g. `/Downloads` -> `C:\Users\you\Downloads`).
+  - `./` is relative to the current working directory.
+  - `../` and `../../` move up parent directories like a normal shell path.
+  - `~` still expands to your home directory.
+  - If you give a directory (ends with `/` or `\` or has no filename), the default filename `%(title)s.%(ext)s` is used.
+  - If you provide a filename without an extension, `.%(ext)s` is appended automatically.
+Examples:
+
+```bash
+# Save to home Downloads with default name
+hi-dlp "URL" -o "/Downloads"
+
+# Save under home Downloads with author folder and title
+hi-dlp "URL" -o "/Downloads/author/title.ext"
+
+# Save two levels up into a sibling folder (cwd = project dir)
+hi-dlp "URL" -o "../../Downloads"
+
+# Use a short letter mnemonic (u=uploader, t=title, e=ext)
+hi-dlp "URL" -o "u_t_e"
+```
+
+The full `%(...)s` templates are still supported and will be used unchanged when provided.
+
 ### Configuration File
 
 Create a configuration file at `~/.config/halal-image-downloader/config` or use `--config-location`:
@@ -254,7 +292,7 @@ uv run ruff check src/
 
 ### Project Structure
 
-```
+```text
 halal-image-downloader/
 ├── src/
 │   └── halal_image_downloader/

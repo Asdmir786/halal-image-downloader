@@ -7,10 +7,12 @@ import argparse
 import sys
 from pathlib import Path
 import time
-from typing import List, Optional
+from typing import List, Optional, cast
 from .extractors.instagram import InstagramExtractor
 from .extractors.pinterest import PinterestExtractor
 from . import __version__
+import os
+import re
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -37,8 +39,10 @@ Examples:
     
     # General Options
     general = parser.add_argument_group('General Options')
+    # Use -v as short flag for version (common shorthand). Move verbose to -V to avoid
+    # clash with the version short flag.
     general.add_argument(
-        '--version',
+        '-v', '--version',
         action='version',
         version=f'%(prog)s {__version__}',
         help='Show program version and exit'
@@ -48,8 +52,9 @@ Examples:
         action='store_true',
         help='Update this program to latest version'
     )
+    # Use -V as short flag for verbose to avoid colliding with -v (version)
     general.add_argument(
-        '-v', '--verbose',
+        '-V', '--verbose',
         action='store_true',
         help='Print various debugging information'
     )
@@ -227,7 +232,10 @@ Examples:
     filesystem.add_argument(
         '-o', '--output',
         metavar='TEMPLATE',
-        help='Output filename template'
+        help=('Output filename template. Supports full templates like "%(uploader)s/%(title)s.%(ext)s", ' \
+             'or a simple readable format using tokens: author, title, date, id, ext. ' \
+             'Special path rules: leading "/" = home, "./" = cwd, "../" = parent. ' \
+             'If filename has no extension, ".%(ext)s" is appended automatically.')
     )
     filesystem.add_argument(
         '--output-na-placeholder',
@@ -505,6 +513,151 @@ Examples:
     return parser
 
 
+def _resolve_output_dir(output: Optional[str]) -> Path:
+    """
+    Expand environment variables and ~ in the provided output template/path,
+    determine the directory portion, create it if necessary, and return the Path.
+
+    If output contains a template placeholder like "%(title)s" we treat the
+    provided string as a filename template and use its parent directory.
+    """
+    if not output:
+        return Path('.')
+    # Expand env vars (Windows %VAR% and Unix $VAR) and user (~)
+    expanded = os.path.expandvars(output)
+    expanded = os.path.expanduser(expanded)
+    p = Path(expanded)
+    # If the original (or expanded) contains format placeholders, use parent
+    if '%(' in output or '%(' in expanded:
+        out_dir = p.parent
+    else:
+        # If path ends with a separator or is an existing dir, treat as dir
+        if expanded.endswith(os.sep) or (p.exists() and p.is_dir()):
+            out_dir = p
+        else:
+            out_dir = p.parent
+    # Ensure directory exists
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def _parse_output_option(output: Optional[str]) -> tuple[str, Path]:
+    """
+    Parse -o/--output value and return (output_template, output_dir).
+
+    Rules implemented:
+    - Expand env vars and ~.
+    - Leading '/' or '\\' is treated as user's home (not filesystem root).
+    - './' and '../' are resolved against the current working directory.
+    - If input contains full-style templates ("%(...)s" or "{...}") it is
+      returned unchanged (but the parent dir is created).
+    - Support simple readable tokens (author, title, date, id, ext, idx, cnt)
+      and short letter mnemonics (u,t,d,i,e,n,c). Example: 'author/title.ext'
+      or 'u_t_e'.
+    - If the filename part lacks an extension, append '.%(ext)s'.
+    - If the path resolves to a directory (ends with separator or looks like a
+      directory) use default filename '%(title)s.%(ext)s'.
+    """
+    default_filename = "%(title)s.%(ext)s"
+    # No output provided -> cwd + default name
+    if not output:
+        out_dir = Path('.').resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return default_filename, out_dir
+
+    raw = output
+    # Expand env vars and user (~)
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+
+    # Leading '/' or '\\' -> user's home
+    if raw.startswith('/') or raw.startswith('\\'):
+        rest = raw.lstrip('/\\')
+        expanded = str(Path.home() / rest)
+
+    # If it starts with './' or '.\\' keep it relative to cwd
+    if raw.startswith('./') or raw.startswith('.\\'):
+        expanded = str(Path.cwd() / raw[2:])
+
+    # Resolve ../ segments against cwd (do not require existing files)
+    cand = Path(expanded)
+    if not cand.is_absolute():
+        cand = (Path.cwd() / expanded).resolve(strict=False)
+    else:
+        cand = cand.resolve(strict=False)
+
+    # Detect full template markers
+    if '%(' in raw or '%(' in expanded or '{' in raw or '{' in expanded:
+        out_template = str(cand)
+        out_dir = cand.parent if cand.name else cand
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_template, out_dir
+
+    # Convert path to forward-slash style for token processing
+    path_str = cand.as_posix()
+
+    # Token maps
+    word_map = {
+        'author': '%(uploader)s',
+        'title': '%(title)s',
+        'date': '%(upload_date)s',
+        'id': '%(id)s',
+        'ext': '%(ext)s',
+        'idx': '%(playlist_index)s',
+        'cnt': '%(autonumber)s',
+    }
+    letter_map = {'u': '%(uploader)s', 't': '%(title)s', 'd': '%(upload_date)s', 'i': '%(id)s', 'e': '%(ext)s', 'n': '%(playlist_index)s', 'c': '%(autonumber)s'}
+
+    # If filename part contains underscores like u_t_e, treat as letter mnemonic
+    dir_part = str(cand.parent.as_posix()) if cand.parent else ''
+    name_part = cand.name
+
+    def expand_segment(seg: str) -> str:
+        # Try letter mnemonic (underscores)
+        if '_' in seg and all(len(p) == 1 for p in seg.split('_')):
+            parts_keys = seg.split('_')
+            parts = [letter_map.get(p) for p in parts_keys]
+            if any(p is None for p in parts):
+                missing = [parts_keys[i] for i,p in enumerate(parts) if p is None]
+                raise ValueError(f"Unknown token(s): {','.join(missing)}")
+            # join with ' - ' for readability
+            return ' - '.join(cast(str, p) for p in parts)
+
+        # Replace whole word tokens (author, title, etc.)
+        def word_repl(m: re.Match) -> str:
+            key = m.group(0)
+            return word_map.get(key, key) or key
+
+        seg2 = re.sub(r'\b(' + '|'.join(map(re.escape, word_map.keys())) + r')\b', word_repl, seg)
+        # If seg2 unchanged but contains letters with no separators, try letters
+        if seg2 == seg and len(seg) <= 4 and all(ch.isalpha() for ch in seg):
+            # treat as sequence of letters
+            parts = [letter_map.get(ch) for ch in seg]
+            if all(p is not None for p in parts):
+                return ' - '.join(cast(str, p) for p in parts)
+        return seg2
+
+    try:
+        expanded_name = expand_segment(name_part) if name_part else ''
+    except ValueError as e:
+        raise
+
+    # Determine if candidate is directory-like
+    is_dir_like = raw.endswith('/') or raw.endswith('\\') or (cand.exists() and cand.is_dir()) or name_part == ''
+    if is_dir_like:
+        out_dir = cand
+        filename = default_filename
+    else:
+        out_dir = cand.parent
+        filename = expanded_name if expanded_name else name_part
+        # if filename contains no extension-like part, append .%(ext)s
+        if '.' not in filename:
+            filename = filename + '.%(ext)s'
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_template = str(Path(out_dir) / filename)
+    return out_template, out_dir
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -557,7 +710,7 @@ def main() -> None:
         if "instagram.com" in args.url:
             print("Detected Instagram URL")
             headless = not args.debug_browser
-            output_dir = Path(args.output).expanduser() if args.output else Path('.')
+            output_dir = _resolve_output_dir(args.output)
             if args.verbose:
                 print(f"Browser mode: {'headless' if headless else 'visible (debug)'}")
                 print(f"Browser engine: {args.browser}")
@@ -581,10 +734,9 @@ def main() -> None:
                 sys.exit(1)
         elif "pinterest.com" in args.url:
             print("Detected Pinterest URL")
-            output_dir = Path(args.output).expanduser() if args.output else Path('.')
+            output_dir = _resolve_output_dir(args.output)
             if args.verbose:
                 print(f"Output directory: {output_dir.resolve()}")
-            output_dir.mkdir(parents=True, exist_ok=True)
 
             start_ts = time.perf_counter()
             extractor = PinterestExtractor()
