@@ -9,5 +9,6 @@ from .base_extractor import BaseExtractor
 from .instagram import InstagramExtractor
 from .pinterest import PinterestExtractor
 from .reddit import RedditExtractor
+from .twitter import TwitterExtractor
 
-__all__ = ['BaseExtractor', 'InstagramExtractor', 'PinterestExtractor', 'RedditExtractor']
+__all__ = ['BaseExtractor', 'InstagramExtractor', 'PinterestExtractor', 'RedditExtractor', 'TwitterExtractor']

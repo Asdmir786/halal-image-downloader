@@ -11,6 +11,7 @@ from typing import List, Optional, cast
 from .extractors.instagram import InstagramExtractor
 from .extractors.pinterest import PinterestExtractor
 from .extractors.reddit import RedditExtractor
+from .extractors.twitter import TwitterExtractor
 from . import __version__
 import os
 import re
@@ -27,7 +28,7 @@ def create_parser() -> argparse.ArgumentParser:
 Examples:
   halal-image-downloader "https://instagram.com/p/ABC123"
   halal-image-downloader "https://pinterest.com/pin/123456789"
-  halal-image-downloader "https://reddit.com/r/EarthPorn/comments/abc123/beautiful_sunset" -o ~/Downloads
+  halal-image-downloader "https://x.com/username/status/123456789" -o ~/Downloads
   halal-image-downloader "https://reddit.com/r/Art" --format jpg --quality best
         '''
     )
@@ -853,8 +854,51 @@ def main() -> None:
                 print("❌ No images were downloaded")
                 print(f"\n⏱ Total time: {elapsed:.2f}s")
                 sys.exit(1)
+        elif "twitter.com" in args.url or "x.com" in args.url:
+            print("Detected Twitter/X.com URL")
+            # Use the already resolved absolute output directory
+            output_dir = out_dir
+            if args.verbose:
+                print(f"Output directory (absolute): {output_dir}")
+
+            start_ts = time.perf_counter()
+            extractor = TwitterExtractor()
+            # Extract images from Twitter post (with interactive mixed media handling)
+            images = extractor.extract(args.url)
+
+            if not images:
+                print("❌ No downloadable images found on this tweet.")
+                sys.exit(1)
+
+            saved: List[Path] = []
+            if args.skip_download:
+                print("--skip-download specified; listing images only:")
+                for item in images:
+                    print(f"  🖼  {item['url']} -> {item['filename']}")
+            else:
+                for item in images:
+                    dest = output_dir / item['filename']
+                    ok = extractor.download_image(item['url'], str(dest))
+                    if ok:
+                        saved.append(dest)
+                    else:
+                        print(f"⚠️  Failed to download {item['url']}")
+
+            elapsed = time.perf_counter() - start_ts
+            if saved:
+                print(f"\n✅ Successfully downloaded {len(saved)} image(s):")
+                for p in saved:
+                    try:
+                        print(f"  📁 {p.resolve()}")
+                    except Exception:
+                        print(f"  📁 {p}")
+                print(f"\n⏱ Total time: {elapsed:.2f}s")
+            else:
+                print("❌ No images were downloaded")
+                print(f"\n⏱ Total time: {elapsed:.2f}s")
+                sys.exit(1)
         else:
-            print("❌ Unsupported platform. Currently Instagram, Pinterest, and Reddit are supported.")
+            print("❌ Unsupported platform. Currently Instagram, Pinterest, Reddit, and Twitter/X.com are supported.")
             sys.exit(1)
             
     except Exception as e:
