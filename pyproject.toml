@@ -1,6 +1,6 @@
 [project]
 name = "halal-image-downloader"
-version = "2025.09.24"
+version = "2025.09.28"
 description = "A command-line tool for fast and reliable image downloading from supported sources."
 readme = "README.md"
 authors = [
@@ -28,5 +28,4 @@ build-backend = "uv_build"
 dev = [
     "black>=25.1.0",
     "pytest>=8.4.2",
-    "ruff>=0.13.0",
 ]

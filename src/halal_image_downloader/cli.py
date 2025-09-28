@@ -7,7 +7,8 @@ import argparse
 import sys
 from pathlib import Path
 import time
-from typing import List, Optional, cast
+import json
+from typing import List, Optional, cast, Dict, Any
 from .extractors.instagram import InstagramExtractor
 from .extractors.pinterest import PinterestExtractor
 from .extractors.reddit import RedditExtractor
@@ -104,6 +105,11 @@ Examples:
         '--print-json',
         action='store_true',
         help='Output progress information as JSON'
+    )
+    general.add_argument(
+        '-J', '--dump-json',
+        action='store_true',
+        help='Dump JSON metadata and exit (no downloading, like yt-dlp -J)'
     )
     
     # Network Options
@@ -235,10 +241,10 @@ Examples:
     filesystem.add_argument(
         '-o', '--output',
         metavar='TEMPLATE',
-        help=('Output filename template. Supports full templates like "%(uploader)s/%(title)s.%(ext)s", ' \
+        help=('Output filename template. Supports full templates like "%%(uploader)s/%%(title)s.%%(ext)s", ' \
              'or a simple readable format using tokens: author, title, date, id, ext. ' \
              'Special path rules: leading "/" = home, "./" = cwd, "../" = parent. ' \
-             'If filename has no extension, ".%(ext)s" is appended automatically.')
+             'If filename has no extension, ".%%(ext)s" is appended automatically.')
     )
     filesystem.add_argument(
         '-E', '--ensure-output-dir',
@@ -683,6 +689,86 @@ def _parse_output_option(output: Optional[str], create_dirs: bool = True) -> tup
     return out_template, out_dir
 
 
+def get_platform_name(url: str) -> str:
+    """Determine platform name from URL."""
+    if "instagram.com" in url:
+        return "instagram"
+    elif "pinterest.com" in url:
+        return "pinterest"
+    elif "reddit.com" in url:
+        return "reddit"
+    elif "twitter.com" in url or "x.com" in url:
+        return "twitter"
+    else:
+        return "unknown"
+
+
+def create_extractor(platform: str, args) -> Any:
+    """Create appropriate extractor based on platform."""
+    if platform == "instagram":
+        return InstagramExtractor(
+            headless=not args.debug_browser,
+            debug_wait_seconds=args.debug_wait,
+            browser=args.browser
+        )
+    elif platform == "pinterest":
+        return PinterestExtractor()
+    elif platform == "reddit":
+        return RedditExtractor()
+    elif platform == "twitter":
+        return TwitterExtractor()
+    else:
+        raise ValueError(f"Unsupported platform: {platform}")
+
+
+def handle_json_dump(args) -> None:
+    """Handle --dump-json mode for all extractors."""
+    try:
+        url = args.url
+        platform = get_platform_name(url)
+        
+        if platform == "unknown":
+            error_json = {
+                "error": "Unsupported platform",
+                "url": url,
+                "supported_platforms": ["instagram", "pinterest", "reddit", "twitter"]
+            }
+            print(json.dumps(error_json, indent=2))
+            sys.exit(1)
+        
+        # Create extractor
+        extractor = create_extractor(platform, args)
+        
+        # Try to get JSON metadata if supported
+        if hasattr(extractor, 'extract_json_metadata'):
+            json_data = extractor.extract_json_metadata(url)
+        else:
+            # Fallback: use regular extract() and format as JSON
+            if args.verbose:
+                print("Extractor doesn't support JSON metadata, using fallback method", file=sys.stderr)
+            
+            images = extractor.extract(url)
+            json_data = {
+                "platform": platform,
+                "url": url,
+                "extraction_method": "fallback",
+                "images": images,
+                "extractor_version": __version__
+            }
+        
+        # Output JSON
+        print(json.dumps(json_data, indent=2))
+        
+    except Exception as e:
+        error_json = {
+            "error": str(e),
+            "url": args.url,
+            "platform": get_platform_name(args.url) if args.url else "unknown"
+        }
+        print(json.dumps(error_json, indent=2))
+        sys.exit(1)
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -714,6 +800,11 @@ def main() -> None:
     # Validate required arguments
     if not args.url:
         parser.error("URL is required")
+    
+    # Handle JSON dump mode early (no need for output directory validation)
+    if args.dump_json:
+        handle_json_dump(args)
+        return
     
     # Resolve output (absolute) respecting --ensure-output-dir and validate existence when not set
     out_template, out_dir = _parse_output_option(args.output, create_dirs=bool(getattr(args, 'ensure_output_dir', False)))
