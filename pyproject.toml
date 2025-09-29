@@ -1,12 +1,27 @@
 [project]
 name = "halal-image-downloader"
-version = "2025.09.28"
+version = "2025.09.29"
 description = "A command-line tool for fast and reliable image downloading from supported sources."
 readme = "README.md"
 authors = [
     { name = "Asdmir786", email = "asmir.alams.com@gmail.com" }
 ]
 requires-python = ">=3.11"
+keywords = ["image", "downloader", "social-media", "instagram", "pinterest", "twitter", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "beautifulsoup4>=4.13.5",
     "fake-useragent>=2.2.0",
@@ -15,6 +30,11 @@ dependencies = [
     "playwright>=1.55.0",
     "requests>=2.32.5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Asdmir786/halal-image-downloader"
+Repository = "https://github.com/Asdmir786/halal-image-downloader"
+Issues = "https://github.com/Asdmir786/halal-image-downloader/issues"
 
 [project.scripts]
 halal-image-downloader = "halal_image_downloader.cli:main"
@@ -27,5 +47,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "black>=25.1.0",
+    "build>=1.3.0",
     "pytest>=8.4.2",
+    "twine>=6.2.0",
 ]

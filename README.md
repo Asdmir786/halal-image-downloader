@@ -2,7 +2,7 @@
 
 A command-line tool for fast and reliable image downloading from supported social media sources.
 
-[![Version](https://img.shields.io/badge/version-2025.09.28-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
+[![Version](https://img.shields.io/badge/version-2025.09.29-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
 [![Python](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](LICENSE)
 
@@ -37,6 +37,42 @@ uv venv
 uv sync
 uv pip install -e .
 ```
+
+### Build and install from source (fast, uv)
+
+Use uv’s builder to quickly produce both the wheel and sdist, then install with uv (or pip):
+
+```powershell
+# Activate venv (Windows)
+.venv\Scripts\activate
+
+# Ensure uv's build backend is available in your venv (one-time)
+uv pip install -U "uv-build>=0.8.17,<0.9.0"
+
+# Build both wheel and sdist quickly (writes to dist/)
+uv build
+
+# Install the freshly built wheel (fastest)
+uv pip install --force-reinstall --no-deps dist\*.whl
+
+# Or install from sdist (tar.gz)
+uv pip install --force-reinstall dist\*.tar.gz
+```
+
+Alternative (if you prefer Python’s build module but want speed):
+
+```powershell
+# With uv-build installed in your venv
+python -m build --wheel --no-isolation
+python -m build --sdist --no-isolation
+
+# Then install
+uv pip install --force-reinstall --no-deps dist\*.whl
+```
+
+Notes:
+- Using uv build or --no-isolation avoids slow isolated env creation, making builds much faster.
+- Use `--no-deps` on reinstall to skip re-resolving dependencies locally.
 
 ### Using pip
 

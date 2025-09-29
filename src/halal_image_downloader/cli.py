@@ -16,6 +16,7 @@ from .extractors.twitter import TwitterExtractor
 from . import __version__
 import os
 import re
+import subprocess
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,10 @@ Examples:
   halal-image-downloader "https://pinterest.com/pin/123456789"
   halal-image-downloader "https://x.com/username/status/123456789" -o ~/Downloads
   halal-image-downloader "https://reddit.com/r/Art" --format jpg --quality best
+
+Tip:
+  You can run this tool using either the short command "hi-dlp" or the full
+  "halal-image-downloader" name.
         '''
     )
     
@@ -79,6 +84,11 @@ Examples:
         choices=['chromium', 'firefox', 'webkit'],
         default='firefox',
         help='Select browser engine for Playwright automation (default: firefox)'
+    )
+    general.add_argument(
+        '--install-browsers',
+        action='store_true',
+        help='Install Playwright browser binaries (for the selected --browser) and exit if no URL is provided'
     )
     # Mode argument removed - only browser mode supported
     general.add_argument(
@@ -774,9 +784,38 @@ def main() -> None:
     parser = create_parser()
     args = parser.parse_args()
     
-    # Handle special cases
-    if not args.url and not args.update and not args.version:
-        parser.print_help()
+    # Friendly startup tip (avoid printing during JSON modes or when quiet)
+    # Show this only when a URL is provided to avoid duplicating tips in no-args flow
+    if (
+        not getattr(args, 'quiet', False)
+        and not getattr(args, 'print_json', False)
+        and not getattr(args, 'dump_json', False)
+        and getattr(args, 'url', None)
+    ):
+        print("Tip: You can run this tool as 'hi-dlp' (short) or 'halal-image-downloader' (full).")
+
+    # Allow installing Playwright browsers as a convenience
+    if getattr(args, 'install_browsers', False):
+        browser_to_install = getattr(args, 'browser', 'chromium') or 'chromium'
+        try:
+            print(f"Installing Playwright browser: {browser_to_install} ...")
+            result = subprocess.run([sys.executable, '-m', 'playwright', 'install', browser_to_install])
+            if result.returncode == 0:
+                print("Playwright browser install complete.")
+            else:
+                print(f"Playwright install exited with code {result.returncode}. You can try running: playwright install {browser_to_install}")
+        except Exception as e:
+            print(f"Failed to install Playwright browser: {e}")
+        # If no URL was provided, exit after installation
+        if not getattr(args, 'url', None):
+            sys.exit(0)
+
+    # Handle invocation without arguments: print only Examples and Tip (epilog), not full help
+    if not args.url and not args.update:
+        if not getattr(args, 'quiet', False):
+            epilog = getattr(parser, 'epilog', '') or ''
+            if epilog:
+                print(epilog.strip("\n"))
         sys.exit(1)
     
     # Handle update command
