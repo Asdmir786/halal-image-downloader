@@ -17,6 +17,7 @@ from . import __version__
 import os
 import re
 import subprocess
+import shutil
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -820,8 +821,38 @@ def main() -> None:
     
     # Handle update command
     if args.update:
-        print("Update functionality not implemented yet")
-        sys.exit(0)
+        print("Updating halal-image-downloader to the latest version...")
+        use_uv = shutil.which("uv") is not None
+        try:
+            if use_uv:
+                cmd = ["uv", "pip", "install", "-U", "halal-image-downloader"]
+            else:
+                cmd = [sys.executable, "-m", "pip", "install", "-U", "halal-image-downloader"]
+            result = subprocess.run(cmd)
+            if result.returncode == 0:
+                try:
+                    from importlib.metadata import version as _pkg_version  # type: ignore
+                    new_version = _pkg_version("halal-image-downloader")
+                    print(f"Update complete. Installed version: {new_version}")
+                except Exception:
+                    print("Update complete.")
+                print("Please re-run the command to use the updated version.")
+                sys.exit(0)
+            else:
+                print("Update failed. You can try running the following command:")
+                if use_uv:
+                    print("  uv pip install -U halal-image-downloader")
+                else:
+                    print(f"  {sys.executable} -m pip install -U halal-image-downloader")
+                sys.exit(result.returncode)
+        except Exception as e:
+            print(f"Update failed: {e}")
+            print("Try running manually:")
+            if use_uv:
+                print("  uv pip install -U halal-image-downloader")
+            else:
+                print(f"  {sys.executable} -m pip install -U halal-image-downloader")
+            sys.exit(1)
     
     # Handle simulation mode
     if args.simulate:
