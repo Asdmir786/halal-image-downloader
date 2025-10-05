@@ -23,8 +23,8 @@ class RedditExtractor(BaseExtractor):
     """Extractor for Reddit content using latest 2025 methods."""
     
     def __init__(self, max_retries: int = 3, use_old_reddit: bool = True):
-        # Initialize base extractor
-        super().__init__(max_retries=max_retries)
+        # Initialize base extractor with strict mode
+        super().__init__(strict_mode=True)
         
         # Reddit-specific settings
         self.use_old_reddit = use_old_reddit
@@ -110,8 +110,8 @@ class RedditExtractor(BaseExtractor):
             raise
     
     def _fetch_json(self, url: str) -> Dict[str, Any]:
-        """Fetch JSON with retry logic."""
-        return self.retry_with_backoff_sync(self._fetch_json_impl, url)
+        """Fetch JSON with strict error handling."""
+        return self.execute_with_error_handling_sync(self._fetch_json_impl, url)
     
     def extract_images_from_post_data(self, post_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extract image URLs and metadata from Reddit post JSON data."""
@@ -368,7 +368,8 @@ class RedditExtractor(BaseExtractor):
         
         return filename
     
-    def extract_images(self, url: str) -> List[Dict[str, Any]]:
+    
+    def extract(self, url: str) -> List[Dict[str, Any]]:
         """Extract image URLs and metadata from Reddit post or subreddit."""
         if not self.is_valid_url(url):
             raise InvalidUrlError(f"Invalid Reddit URL format: {url}")
@@ -399,10 +400,6 @@ class RedditExtractor(BaseExtractor):
         except Exception as e:
             logger.error(f"Error extracting images from {url}: {e}")
             return []
-    
-    def extract(self, url: str) -> List[Dict[str, Any]]:
-        """Main extraction method - implements BaseExtractor abstract method."""
-        return self.extract_images(url)
     
     def extract_json_metadata(self, url: str) -> Dict[str, Any]:
         """Extract comprehensive JSON metadata from Reddit post or subreddit."""
@@ -499,11 +496,11 @@ class RedditExtractor(BaseExtractor):
             }
     
     def download_image(self, image_url: str, output_path: str) -> bool:
-        """Download a single image from Reddit with retry logic."""
+        """Download a single image from Reddit with strict error handling."""
         try:
-            return self.retry_with_backoff_sync(self._download_image_impl, image_url, output_path)
+            return self.execute_with_error_handling_sync(self._download_image_impl, image_url, output_path)
         except Exception as e:
-            logger.error(f"Failed to download image after all retries: {e}")
+            logger.error(f"Failed to download image: {e}")
             return False
     
     def _download_image_impl(self, image_url: str, output_path: str) -> bool:
@@ -620,6 +617,3 @@ class RedditExtractor(BaseExtractor):
             logger.error(f"Error validating downloaded image: {e}")
             return False
     
-    def close(self):
-        """Close the session."""
-        self.session.close()

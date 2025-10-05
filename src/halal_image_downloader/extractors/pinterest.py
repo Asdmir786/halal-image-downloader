@@ -22,8 +22,8 @@ class PinterestExtractor(BaseExtractor):
     """Extractor for Pinterest content."""
     
     def __init__(self, max_retries: int = 3):
-        # Initialize base extractor
-        super().__init__(max_retries=max_retries)
+        # Initialize base extractor with strict mode
+        super().__init__(strict_mode=True)
         
         # Pinterest-specific settings
         self.session = requests.Session()
@@ -72,8 +72,8 @@ class PinterestExtractor(BaseExtractor):
             raise
     
     def _fetch_html(self, url: str) -> str:
-        """Fetch HTML with retry logic."""
-        return self.retry_with_backoff_sync(self._fetch_html_impl, url)
+        """Fetch HTML with strict error handling."""
+        return self.execute_with_error_handling_sync(self._fetch_html_impl, url)
 
     def _extract_meta_signals(self, soup: BeautifulSoup) -> Dict[str, Any]:
         """Extract key OpenGraph/Twitter meta signals for type detection."""
@@ -300,7 +300,7 @@ class PinterestExtractor(BaseExtractor):
     def extract_images(self, url: str) -> List[Dict[str, Any]]:
         """Extract image URLs and metadata from Pinterest pin with comprehensive error handling."""
         try:
-            pin_info = self.retry_with_backoff_sync(self.get_pin_info, url)
+            pin_info = self.execute_with_error_handling_sync(self.get_pin_info, url)
             html = pin_info.get('html') or self._fetch_html(url)
             soup = BeautifulSoup(html, 'html.parser')
         except PermanentError as e:
@@ -426,22 +426,12 @@ class PinterestExtractor(BaseExtractor):
 
         return results
     
-    def get_board_pins(self, board_url: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Extract all pins from a Pinterest board."""
-        # TODO: Implement board extraction
-        return []
-    
-    def get_profile_pins(self, profile_url: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Extract pins from a Pinterest profile."""
-        # TODO: Implement profile extraction
-        return []
-    
     def download_image(self, image_url: str, output_path: str) -> bool:
-        """Download a single image from Pinterest with retry logic."""
+        """Download a single image from Pinterest with strict error handling."""
         try:
-            return self.retry_with_backoff_sync(self._download_image_impl, image_url, output_path)
+            return self.execute_with_error_handling_sync(self._download_image_impl, image_url, output_path)
         except Exception as e:
-            logger.error(f"Failed to download image after all retries: {e}")
+            logger.error(f"Failed to download image: {e}")
             return False
     
     def _download_image_impl(self, image_url: str, output_path: str) -> bool:
@@ -463,15 +453,4 @@ class PinterestExtractor(BaseExtractor):
             # Re-raise to be handled by retry mechanism
             raise
     
-    def extract(self, url: str) -> List[Dict[str, Any]]:
-        """Main extraction method - implements BaseExtractor abstract method."""
-        return self.extract_images(url)
-    
-    def search_pins(self, query: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Search for pins based on a query."""
-        # TODO: Implement Pinterest search
-        return []
-    
-    def close(self):
-        """Close the session."""
-        self.session.close()
+    # Main method: extract_images() - no need for abstract extract() wrapper

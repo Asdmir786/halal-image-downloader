@@ -4,15 +4,18 @@ Command-line interface for halal-image-downloader
 """
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 import time
 import json
 from typing import List, Optional, cast, Dict, Any
 from .extractors.instagram import InstagramExtractor
+from .extractors.instagram_direct import InstagramDirectExtractor
 from .extractors.pinterest import PinterestExtractor
 from .extractors.reddit import RedditExtractor
 from .extractors.twitter import TwitterExtractor
+from .extractors.base_extractor import logger, PermanentError
 from . import __version__
 import os
 import re
@@ -83,8 +86,8 @@ Tip:
     general.add_argument(
         '--browser',
         choices=['chromium', 'firefox', 'webkit'],
-        default='firefox',
-        help='Select browser engine for Playwright automation (default: firefox)'
+        default='chromium',
+        help='Select browser engine for Playwright automation (default: chromium)'
     )
     general.add_argument(
         '--install-browsers',
@@ -732,6 +735,83 @@ def create_extractor(platform: str, args) -> Any:
         raise ValueError(f"Unsupported platform: {platform}")
 
 
+async def analyze_instagram_post(url: str, output_dir: Path, args) -> tuple[Any, bool, List[Dict], Any]:
+    """Analyze Instagram post using direct method for metadata + carousel detection.
+    Returns: (metadata, is_carousel, images_info, browser_context)
+    """
+    # Use direct extractor for analysis only (skip_download=True)
+    direct_extractor = InstagramDirectExtractor(
+        output_dir=str(output_dir),
+        headless=not args.debug_browser,
+        debug_wait_seconds=args.debug_wait,
+        browser=args.browser,
+        skip_download=True,  # Analysis only, no downloads
+        interactive_pauses=False,  # Non-interactive for analysis
+    )
+    
+    try:
+        # Extract metadata and detect content type, keep browser open
+        metadata, images, browser_context = await direct_extractor._navigate_and_collect_analysis_keep_browser(url)
+        
+        # Detect carousel based on analysis results
+        is_carousel = (len(images) >= 1 and images[0].get('url') == 'carousel_detected')
+        
+        print(f"📊 Analysis complete:")
+        if metadata.author:
+            print(f"   👤 Author: {metadata.author}{'✓' if metadata.verified else ''}")
+        if metadata.caption:
+            print(f"   📝 Caption: {metadata.caption[:50]}{'...' if len(metadata.caption) > 50 else ''}")
+        print(f"   🖼️  Content: {'Carousel' if is_carousel else 'Single image'}")
+        
+        return metadata, is_carousel, images, browser_context
+        
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}")
+        print(f"❌ Instagram analysis failed: {e}")
+        raise PermanentError from e
+
+
+def rename_saveclip_files_with_metadata(downloaded_files: List[Path], metadata, post_id: str) -> List[Path]:
+    """Rename SaveClip downloaded files with rich metadata from direct analysis."""
+    if not metadata or not metadata.author:
+        return downloaded_files  # No metadata to apply
+    
+    renamed_files = []
+    total = len(downloaded_files)
+    
+    for i, old_path in enumerate(downloaded_files, 1):
+        try:
+            # Ensure old_path is a Path object
+            old_path = Path(old_path)
+            
+            # Build rich filename like direct extractor
+            author = metadata.author
+            ext = old_path.suffix or '.jpg'
+            
+            if total > 1:
+                # Carousel: author__1of3 format
+                new_name = f"instagram_image__by_{author}__{i}of{total}{ext}"
+            else:
+                # Single: author format
+                new_name = f"instagram_image__by_{author}{ext}"
+            
+            new_path = old_path.parent / new_name
+            
+            # Rename file
+            if old_path != new_path:
+                old_path.rename(new_path)
+                print(f"📝 Renamed: {old_path.name} → {new_path.name}")
+                renamed_files.append(new_path)
+            else:
+                renamed_files.append(old_path)
+                
+        except Exception as e:
+            logger.error(f"Failed to rename {old_path}: {e}")
+            raise PermanentError(f"File rename failed: {e}") from e
+    
+    return renamed_files
+
+
 def handle_json_dump(args) -> None:
     """Handle --dump-json mode for all extractors."""
     try:
@@ -900,20 +980,105 @@ def main() -> None:
     # Determine platform and extract images
     try:
         if "instagram.com" in args.url:
-            print("Detected Instagram URL")
+            print("🔍 Platform: Instagram detected")
+            print("🚀 Method: Hybrid extraction (analysis + download)")
             headless = not args.debug_browser
-            # Use the already resolved absolute output directory
             output_dir = out_dir
+            
             if args.verbose:
                 print(f"Browser mode: {'headless' if headless else 'visible (debug)'}")
                 print(f"Browser engine: {args.browser}")
                 print(f"Output directory (absolute): {output_dir}")
-            # Timer start
+            
             start_ts = time.perf_counter()
-            downloaded_files: List[Path] = []
-            # Use browser-based extraction only
-            browser_extractor = InstagramExtractor(output_dir=str(output_dir), headless=headless, debug_wait_seconds=args.debug_wait, browser=args.browser)
-            downloaded_files = browser_extractor.extract(args.url)
+            
+            try:
+                # Phase 1: Analyze post with direct method (metadata + carousel detection)
+                print("\n🔍 Phase 1: Analyzing post structure and metadata...")
+                metadata, is_carousel, images_info, browser_context = asyncio.run(
+                    analyze_instagram_post(args.url, output_dir, args)
+                )
+                
+                async def phase2_download():
+                    """Async wrapper for Phase 2 downloads"""
+                    if args.skip_download:
+                        # Close browser since we're not downloading
+                        if browser_context:
+                            try:
+                                await browser_context.close()
+                            except:
+                                pass
+                        return []
+                    
+                    # Phase 2: Choose download method based on content type
+                    if is_carousel:
+                        print(f"\n📁 Phase 2: Downloading carousel via SaveClip...")
+                        # Use SaveClip extractor for carousel downloads
+                        saveclip_extractor = InstagramExtractor(
+                            output_dir=str(output_dir),
+                            headless=headless,
+                            debug_wait_seconds=args.debug_wait,
+                            browser=args.browser,
+                        )
+                        files = await saveclip_extractor.extract_with_saveclip(args.url)
+                        return files
+                    else:
+                        print("\n🖼️  Phase 2: Downloading single image via direct method...")
+                        # Use direct extractor for fast single image download
+                        direct_extractor = InstagramDirectExtractor(
+                            output_dir=str(output_dir),
+                            headless=headless,
+                            debug_wait_seconds=args.debug_wait,
+                            browser=args.browser,
+                            skip_download=False,  # Enable download
+                            interactive_pauses=False,
+                        )
+                        files = await direct_extractor._download_from_analysis(args.url, metadata, images_info)
+                        return files
+                
+                if args.skip_download:
+                    # Run async close browser function
+                    asyncio.run(phase2_download())
+                    
+                    # Just list what would be downloaded
+                    if not images_info:
+                        print("❌ No downloadable images found on this Instagram post.")
+                        sys.exit(1)
+                    
+                    print("\n--skip-download specified; listing images only:")
+                    for i, img_info in enumerate(images_info, 1):
+                        if metadata and metadata.author:
+                            if is_carousel:
+                                filename = f"instagram_image__by_{metadata.author}__{i}of{len(images_info)}.jpg"
+                            else:
+                                filename = f"instagram_image__by_{metadata.author}.jpg"
+                        else:
+                            filename = f"instagram_image_{i}.jpg"
+                        dest = output_dir / filename
+                        print(f"  🖼  {img_info.get('url', 'N/A')} -> {dest.resolve()}")
+                    
+                    elapsed = time.perf_counter() - start_ts
+                    print(f"\n⏱ Total time: {elapsed:.2f}s")
+                    sys.exit(0)
+                
+                # Run Phase 2 downloads
+                downloaded_files = asyncio.run(phase2_download())
+                
+                # Apply rich metadata to filenames for carousel
+                if downloaded_files and metadata and is_carousel:
+                    post_id = InstagramDirectExtractor.extract_post_id(args.url)
+                    downloaded_files = rename_saveclip_files_with_metadata(
+                        downloaded_files, metadata, post_id or "unknown"
+                    )
+            
+            except Exception as e:
+                logger.error(f"Hybrid Instagram extraction failed: {e}")
+                print(f"❌ Error: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+                sys.exit(1)
+            
             elapsed = time.perf_counter() - start_ts
             
             if downloaded_files:

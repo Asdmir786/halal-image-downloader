@@ -1,6 +1,6 @@
 [project]
 name = "halal-image-downloader"
-version = "2025.09.29.2"
+version = "2025.10.06"
 description = "A command-line tool for fast and reliable image downloading from supported sources."
 readme = "README.md"
 authors = [
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     "beautifulsoup4>=4.13.5",
     "fake-useragent>=2.2.0",
-    "httpx>=0.28.1",
+    "httpx[http2]>=0.28.1",
     "pillow>=11.3.0",
     "playwright>=1.55.0",
     "requests>=2.32.5",

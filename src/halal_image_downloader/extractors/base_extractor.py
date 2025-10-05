@@ -62,15 +62,13 @@ class NetworkError(TemporaryError):
 class BaseExtractor(ABC):
     """Base class for all platform extractors with shared functionality."""
     
-    def __init__(self, max_retries: int = 3):
-        """Initialize base extractor with common settings."""
+    def __init__(self, strict_mode: bool = True):
+        """Initialize base extractor with strict error handling."""
         # User agent management
         self.ua = UserAgent()
         
-        # Retry configuration
-        self.max_retries = max_retries
-        self.base_delay = 1.0  # Base delay in seconds
-        self.max_delay = 60.0  # Maximum delay in seconds
+        # Strict mode - fail fast, no fallbacks
+        self.strict_mode = strict_mode
         
         # Platform-specific initialization will be handled by subclasses
     
@@ -81,29 +79,29 @@ class BaseExtractor(ABC):
         return headers
     
     def classify_error(self, error: Exception) -> ExtractorError:
-        """Classify errors to determine if they should be retried."""
+        """Classify errors - fail fast, no fallbacks."""
         error_msg = str(error).lower()
         
-        # Network-related errors (temporary)
+        # Network-related errors (permanent failure)
         if any(keyword in error_msg for keyword in [
             'timeout', 'connection', 'network', 'dns', 'resolve',
             'unreachable', 'refused', 'reset', 'read timed out'
         ]):
-            return NetworkError(f"Network error: {error}")
+            return PermanentError(f"Network connection failed: {error}")
         
-        # Rate limiting (temporary)
+        # Rate limiting (permanent failure)
         if any(keyword in error_msg for keyword in [
             'rate limit', 'too many requests', 'throttle', 'blocked',
             'captcha', '429'
         ]):
-            return RateLimitError(f"Rate limited: {error}")
+            return PermanentError(f"Rate limited or blocked: {error}")
         
-        # Service unavailable (temporary)
+        # Service unavailable (permanent failure)
         if any(keyword in error_msg for keyword in [
             'service unavailable', '503', '502', '504', 'bad gateway',
             'server error', 'maintenance', '500'
         ]):
-            return ServiceUnavailableError(f"Service unavailable: {error}")
+            return PermanentError(f"Service error: {error}")
         
         # Invalid URLs or content (permanent)
         if any(keyword in error_msg for keyword in [
@@ -112,64 +110,26 @@ class BaseExtractor(ABC):
         ]):
             return InvalidUrlError(f"Invalid URL or content: {error}")
         
-        # Default to temporary error for unknown issues
-        return TemporaryError(f"Temporary error: {error}")
+        # Fail fast - no fallbacks for unknown errors
+        return PermanentError(f"Extraction failed: {error}")
     
-    async def retry_with_backoff_async(self, func, *args, **kwargs):
-        """Retry a function with exponential backoff (async version)."""
-        last_exception = None
-        
-        for attempt in range(self.max_retries + 1):
-            try:
-                return await func(*args, **kwargs)
-            except PermanentError:
-                # Don't retry permanent errors
-                raise
-            except Exception as e:
-                last_exception = e
-                error_type = self.classify_error(e)
-                
-                if isinstance(error_type, PermanentError):
-                    raise error_type
-                
-                if attempt == self.max_retries:
-                    logger.error(f"Max retries ({self.max_retries}) exceeded. Last error: {e}")
-                    break
-                
-                # Calculate delay with exponential backoff
-                delay = min(self.base_delay * (2 ** attempt), self.max_delay)
-                logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay:.1f}s...")
-                await asyncio.sleep(delay)
-        
-        raise last_exception or ExtractorError("Unknown error occurred")
+    async def execute_with_error_handling(self, func, *args, **kwargs):
+        """Execute function with strict error handling - no retries, fail fast."""
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            error_type = self.classify_error(e)
+            logger.error(f"Extraction failed: {error_type}")
+            raise error_type
     
-    def retry_with_backoff_sync(self, func, *args, **kwargs):
-        """Retry a function with exponential backoff (sync version)."""
-        last_exception = None
-        
-        for attempt in range(self.max_retries + 1):
-            try:
-                return func(*args, **kwargs)
-            except PermanentError:
-                # Don't retry permanent errors
-                raise
-            except Exception as e:
-                last_exception = e
-                error_type = self.classify_error(e)
-                
-                if isinstance(error_type, PermanentError):
-                    raise error_type
-                
-                if attempt == self.max_retries:
-                    logger.error(f"Max retries ({self.max_retries}) exceeded. Last error: {e}")
-                    break
-                
-                # Calculate delay with exponential backoff
-                delay = min(self.base_delay * (2 ** attempt), self.max_delay)
-                logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-        
-        raise last_exception or ExtractorError("Unknown error occurred")
+    def execute_with_error_handling_sync(self, func, *args, **kwargs):
+        """Execute function with strict error handling - no retries, fail fast."""
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            error_type = self.classify_error(e)
+            logger.error(f"Extraction failed: {error_type}")
+            raise error_type
     
     @staticmethod
     def sanitize_filename(filename: str) -> str:
@@ -187,7 +147,9 @@ class BaseExtractor(ABC):
         """Check if the URL is valid for this platform."""
         pass
     
-    @abstractmethod
-    def extract(self, url: str):
-        """Main extraction method - must be implemented by subclasses."""
-        pass
+    # No abstract extraction method - each platform uses its own preferred method:
+    # - InstagramExtractor: extract_with_saveclip()
+    # - InstagramDirectExtractor: discover() 
+    # - PinterestExtractor: extract_images()
+    # - RedditExtractor: extract()
+    # - TwitterExtractor: extract_images()

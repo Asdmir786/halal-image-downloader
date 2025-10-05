@@ -7,6 +7,7 @@ Extracts images from Instagram posts using SaveClip.app service with Playwright 
 import asyncio
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
@@ -22,9 +23,9 @@ from .base_extractor import (
 )
 
 class InstagramExtractor(BaseExtractor):
-    def __init__(self, output_dir=".", headless: bool = True, debug_wait_seconds: float = 0.0, browser: str = "firefox", max_retries: int = 3):
-        # Initialize base extractor
-        super().__init__(max_retries=max_retries)
+    def __init__(self, output_dir=".", headless: bool = True, debug_wait_seconds: float = 0.0, browser: str = "chromium", max_retries: int = 3):
+        # Initialize base extractor with strict mode
+        super().__init__(strict_mode=True)
         
         # Instagram-specific settings
         self.output_dir = Path(output_dir)
@@ -32,9 +33,9 @@ class InstagramExtractor(BaseExtractor):
         
         self.headless = headless
         self.debug_wait_ms = int(max(0.0, debug_wait_seconds) * 1000)
-        self.browser_engine = (browser or "firefox").strip().lower()
+        self.browser_engine = (browser or "chromium").strip().lower()
         if self.browser_engine not in {"chromium", "firefox", "webkit"}:
-            self.browser_engine = "firefox"
+            self.browser_engine = "chromium"
         
         self.headers = {
             'User-Agent': self.ua.random,
@@ -45,6 +46,20 @@ class InstagramExtractor(BaseExtractor):
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         }
+        
+        # Connection pooling: persistent HTTP client for faster downloads
+        self._http_client = httpx.Client(
+            timeout=30,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
+        )
+    
+    def __del__(self):
+        """Cleanup: close HTTP client when extractor is destroyed."""
+        try:
+            if hasattr(self, '_http_client') and self._http_client:
+                self._http_client.close()
+        except Exception:
+            pass
     
     @staticmethod
     def is_valid_url(url: str) -> bool:
@@ -62,33 +77,58 @@ class InstagramExtractor(BaseExtractor):
         return match.group(1) if match else None
     
     
-    def download_image(self, image_url, filename):
-        """Download an image from URL with retry logic."""
-        return self.retry_with_backoff_sync(self._download_image_impl, image_url, filename)
     
-    def _download_image_impl(self, image_url, filename):
-        """Implementation of image downloading (without retry logic)."""
-        try:
-            # Use fresh user agent for each request
-            headers = self.get_fresh_headers(self.headers)
-            
-            with httpx.stream('GET', image_url, headers=headers, timeout=30) as response:
-                response.raise_for_status()
-                
-                filepath = self.output_dir / filename
-                with open(filepath, 'wb') as f:
-                    for chunk in response.iter_bytes(chunk_size=8192):
-                        f.write(chunk)
-            
-            return filepath
-            
-        except Exception as e:
-            logger.error(f"Error downloading image {image_url}: {e}")
-            # Re-raise to be handled by retry mechanism
-            raise
+    async def _download_images_concurrent(self, image_downloads):
+        """Download multiple images concurrently for maximum speed."""
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        
+        async def download_single_async(download_url, filename, index):
+            """Download single image in thread pool."""
+            loop = asyncio.get_event_loop()
+            try:
+                # Run sync download in thread pool to avoid blocking
+                filepath = await loop.run_in_executor(
+                    None, 
+                    lambda: self.download_image(download_url, filename)
+                )
+                if filepath:
+                    print(f"✅ Downloaded image {index}/{len(image_downloads)}: {Path(filepath).name}")
+                    return filepath
+                else:
+                    print(f"❌ Failed to download image {index}/{len(image_downloads)}")
+                    return None
+            except Exception as e:
+                logger.error(f"Failed to download image {index}: {e}")
+                print(f"✗ Failed to download image {index}: {e}")
+                return None
+        
+        # Create concurrent download tasks
+        tasks = [
+            download_single_async(download_url, filename, i+1)
+            for i, (download_url, filename) in enumerate(image_downloads)
+        ]
+        
+        # Execute all downloads concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter successful downloads
+        downloaded_files = [
+            result for result in results 
+            if result is not None and not isinstance(result, Exception)
+        ]
+        
+        return downloaded_files
     
     async def _extract_with_saveclip_impl(self, instagram_url):
         """Implementation of SaveClip extraction (without retry logic)."""
+        
+        # Clear post identification logging
+        post_id = self.extract_post_id(instagram_url)
+        post_type = "reel" if "/reel/" in instagram_url else "post"
+        print(f"🔍 Detected Instagram {post_type}: {post_id}")
+        print(f"📍 Post URL: {instagram_url}")
+        
         async with async_playwright() as p:
             browser = None
             try:
@@ -201,19 +241,9 @@ class InstagramExtractor(BaseExtractor):
                 if not download_btn_clicked:
                     raise Exception("Could not find or click any download button")
                 
-                # Wait for processing and handle modal if it appears
+                # Wait for processing
                 print("Waiting for processing...")
                 await page.wait_for_timeout(500)  # quick settle
-                
-                # Check for and close modal dialog
-                try:
-                    modal_close_selector = '#closeModalBtn, .modal .btn:has-text("Close")'
-                    if await page.is_visible(modal_close_selector):
-                        print("Closing modal dialog...")
-                        await page.click(modal_close_selector)
-                        await page.wait_for_timeout(2000)
-                except:
-                    pass  # Modal might not appear
                 
                 # If SaveClip shows the loader, wait until it disappears
                 try:
@@ -252,13 +282,53 @@ class InstagramExtractor(BaseExtractor):
                     'div:has-text("Not found")'
                 ]
                 
-                # Single wait for results (no polling/re-click loops)
+                # Try to find results with retry logic
                 matched_links = []
-                try:
-                    await page.wait_for_selector(target_selector, state='visible', timeout=8000)
-                    matched_links = await page.query_selector_all(target_selector)
-                    print(f"Found {len(matched_links)} matching 'Download Image' link(s)")
-                except Exception:
+                retry_attempted = False
+                
+                for attempt in range(2):  # Try twice
+                    try:
+                        await page.wait_for_selector(target_selector, state='visible', timeout=8000)
+                        matched_links = await page.query_selector_all(target_selector)
+                        content_type = "carousel" if len(matched_links) > 1 else "single image"
+                        print(f"✅ Found Instagram {content_type} - {len(matched_links)} image(s) detected")
+                        break  # Success, exit retry loop
+                    except Exception:
+                        # Check if loader is still running
+                        loader_still_running = False
+                        try:
+                            loader_selector = '#loader-wrapper'
+                            loader_visible = await page.is_visible(loader_selector)
+                            loader_display = None
+                            try:
+                                loader_display = await page.eval_on_selector(loader_selector, 'el => getComputedStyle(el).display')
+                            except Exception:
+                                pass
+                            loader_still_running = loader_visible or loader_display == 'block'
+                        except Exception:
+                            pass
+                        
+                        # If no loader AND no results AND haven't retried yet, try clicking download again
+                        if not loader_still_running and not retry_attempted and attempt == 0:
+                            print("No loader or results found. Trying to click download button again...")
+                            retry_attempted = True
+                            try:
+                                # Try to click download button again using same selectors
+                                for btn_sel in download_btn_selectors:
+                                    try:
+                                        if await page.is_visible(btn_sel):
+                                            await page.click(btn_sel)
+                                            print(f"Re-clicked download button: {btn_sel}")
+                                            await page.wait_for_timeout(3000)  # Wait longer after re-click
+                                            break
+                                    except Exception as e:
+                                        continue
+                            except Exception:
+                                pass
+                        else:
+                            break  # No retry or already retried, exit loop
+
+                if not matched_links:
                     # Enhanced diagnostics for debugging
                     print("\n=== DIAGNOSTIC INFO ===")
                     try:
@@ -304,17 +374,17 @@ class InstagramExtractor(BaseExtractor):
                     else:
                         raise ServiceUnavailableError("No matching 'Download Image' links found on SaveClip page")
                 
-                print(f"Found {len(matched_links)} items to process...")
+                print(f"📋 Processing {len(matched_links)} image(s) for download...")
                 
                 image_downloads = []
                 for i, link in enumerate(matched_links, 1):
                     try:
                         download_url = await link.get_attribute('href')
                         if not download_url:
-                            print(f"Item {i}: No download URL found")
+                            print(f"❌ Image {i}/{len(matched_links)}: No download URL found")
                             continue
                         
-                        print(f"Item {i}: Found image download URL")
+                        print(f"🔗 Image {i}/{len(matched_links)}: Download URL extracted")
                         
                         # Try to extract filename from the URL or use default
                         try:
@@ -352,23 +422,11 @@ class InstagramExtractor(BaseExtractor):
                 if not image_downloads:
                     raise Exception("No images found to download")
                 
-                # Download all images
-                print(f"\nDownloading {len(image_downloads)} image(s)...")
-                downloaded_files = []
+                # Download all images concurrently for maximum speed
+                print(f"\n⬇️  Starting download of {len(image_downloads)} image(s)...")
+                downloaded_files = await self._download_images_concurrent(image_downloads)
                 
-                for i, (download_url, filename) in enumerate(image_downloads, 1):
-                    print(f"Downloading image {i}/{len(image_downloads)}: {filename}")
-                    try:
-                        filepath = self.download_image(download_url, filename)
-                        if filepath:
-                            downloaded_files.append(filepath)
-                            print(f"✓ Downloaded: {filepath}")
-                        else:
-                            print(f"✗ Failed to download image {i}")
-                    except Exception as e:
-                        logger.error(f"Failed to download image {i}: {e}")
-                        print(f"✗ Failed to download image {i}: {e}")
-                
+                print(f"🎉 Successfully extracted {len(downloaded_files)} image(s) from Instagram {post_type}: {post_id}")
                 return downloaded_files
                 
             except Exception as e:
@@ -385,34 +443,165 @@ class InstagramExtractor(BaseExtractor):
                 raise
     
     async def extract_with_saveclip(self, instagram_url):
-        """Extract images using SaveClip.app service with retry logic."""
-        return await self.retry_with_backoff_async(self._extract_with_saveclip_impl, instagram_url)
+        """Extract images using SaveClip.app service with strict error handling."""
+        return await self.execute_with_error_handling(self._extract_with_saveclip_impl, instagram_url)
     
-    def extract(self, url):
-        """Main extraction method with comprehensive error handling."""
-        post_id = self.extract_post_id(url)
-        if not post_id:
-            logger.error(f"Could not extract post ID from URL: {url}")
-            raise InvalidUrlError(f"Invalid Instagram URL format: {url}")
-        
-        logger.info(f"Extracting images from Instagram post: {post_id}")
-        logger.info(f"Using SaveClip.app service with retry mechanism...")
-        
+    async def extract_with_browser(self, instagram_url, browser_context):
+        """Extract images using SaveClip.app with existing browser (browser reuse optimization)."""
         try:
-            # Run the async extraction with retry logic
-            result_files = asyncio.run(self.extract_with_saveclip(url))
-            logger.info(f"Successfully extracted {len(result_files)} image(s)")
-            return result_files
+            # Create new page in existing browser context
+            page = await browser_context.new_page()
             
-        except PermanentError as e:
-            logger.error(f"Permanent error - not retrying: {e}")
-            return []
-        except (RateLimitError, ServiceUnavailableError, NetworkError) as e:
-            logger.error(f"Temporary error - all retries exhausted: {e}")
-            return []
+            # Use existing SaveClip logic but with reused browser
+            return await self._extract_with_saveclip_impl_with_page(instagram_url, page)
+            
+        finally:
+            # Close browser at the end
+            try:
+                await browser_context.close()
+            except:
+                pass
+    
+    async def _extract_with_saveclip_impl_with_page(self, instagram_url, page):
+        """SaveClip extraction using existing page (for browser reuse)."""
+        try:
+            print("Navigating to SaveClip.app...")
+            await page.goto("https://saveclip.app/en", wait_until="domcontentloaded", timeout=20000)
+            
+            # Rest of SaveClip logic using the provided page
+            # Check for and dismiss cookie consent banner  
+            try:
+                cookie_banner_selector = 'button:has-text("Accept"), button:has-text("OK"), button:has-text("Allow"), button:has-text("Agree")'
+                if await page.is_visible(cookie_banner_selector):
+                    await page.click(cookie_banner_selector)
+                    await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            
+            print("Entering Instagram URL...")
+            url_input_selector = 'input[type="text"], input[type="url"], textarea'
+            await page.fill(url_input_selector, instagram_url)
+            
+            print("Clicking download button...")
+            download_btn_selectors = [
+                'button:has-text("Download")',
+                'input[type="submit"]',
+                'button[type="submit"]',
+                '.download-btn',
+                '.btn-download'
+            ]
+            
+            download_btn_clicked = False
+            for btn_sel in download_btn_selectors:
+                try:
+                    if await page.is_visible(btn_sel):
+                        await page.click(btn_sel)
+                        download_btn_clicked = True
+                        print(f"Successfully clicked download button: {btn_sel}")
+                        break
+                except Exception as e:
+                    print(f"Failed to click {btn_sel}: {e}")
+                    continue
+            
+            if not download_btn_clicked:
+                raise Exception("Could not find or click any download button")
+            
+            # Wait for processing
+            print("Waiting for processing...")
+            await page.wait_for_timeout(500)
+            
+            # Wait for loader to disappear
+            try:
+                loader_selector = '#loader-wrapper'
+                loader_visible = await page.is_visible(loader_selector)
+                loader_display = None
+                try:
+                    loader_display = await page.eval_on_selector(loader_selector, 'el => getComputedStyle(el).display')
+                except Exception:
+                    pass
+                if loader_visible or loader_display == 'block':
+                    print("Loader detected. Waiting for processing to complete...")
+                    try:
+                        await page.wait_for_selector(loader_selector, state='hidden', timeout=15000)
+                    except Exception:
+                        await page.wait_for_timeout(2000)
+            except Exception:
+                pass
+            
+            # Try to find results with retry logic (same as main method)
+            target_selector = (
+                'div.download-items__btn > '
+                'a[id^="photo_dl_"][href*="dl.snapcdn.app/saveinsta"][title^="Download Photo"]:has-text("Download Image")'
+            )
+            
+            matched_links = []
+            retry_attempted = False
+            
+            for attempt in range(2):
+                try:
+                    await page.wait_for_selector(target_selector, state='visible', timeout=8000)
+                    matched_links = await page.query_selector_all(target_selector)
+                    print(f"Found {len(matched_links)} matching 'Download Image' link(s)")
+                    break
+                except Exception:
+                    loader_still_running = False
+                    try:
+                        loader_visible = await page.is_visible(loader_selector)
+                        loader_display = None
+                        try:
+                            loader_display = await page.eval_on_selector(loader_selector, 'el => getComputedStyle(el).display')
+                        except Exception:
+                            pass
+                        loader_still_running = loader_visible or loader_display == 'block'
+                    except Exception:
+                        pass
+                    
+                    if not loader_still_running and not retry_attempted and attempt == 0:
+                        print("No loader or results found. Trying to click download button again...")
+                        retry_attempted = True
+                        try:
+                            for btn_sel in download_btn_selectors:
+                                try:
+                                    if await page.is_visible(btn_sel):
+                                        await page.click(btn_sel)
+                                        print(f"Re-clicked download button: {btn_sel}")
+                                        await page.wait_for_timeout(3000)
+                                        break
+                                except Exception as e:
+                                    continue
+                        except Exception:
+                            pass
+                    else:
+                        break
+            
+            if not matched_links:
+                raise Exception("Instagram post is private or not found")
+            
+            # Extract download URLs and download images concurrently
+            image_downloads = []
+            for i, link in enumerate(matched_links, 1):
+                try:
+                    download_url = await link.get_attribute('href')
+                    if download_url:
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        filename = f"instagram_image_{i}_{timestamp}.jpg"
+                        image_downloads.append((download_url, filename))
+                except Exception as e:
+                    print(f"Error processing item {i}: {e}")
+                    continue
+            
+            if not image_downloads:
+                raise Exception("No images found to download")
+            
+            # Download all images concurrently for maximum speed
+            print(f"\nDownloading {len(image_downloads)} image(s) concurrently...")
+            downloaded_files = await self._download_images_concurrent(image_downloads)
+            
+            return downloaded_files
+            
         except Exception as e:
-            logger.error(f"Unexpected error during extraction: {e}")
-            return []
+            logger.error(f"Error during SaveClip extraction: {e}")
+            raise
     
     def extract_json_metadata(self, url: str) -> Dict[str, Any]:
         """Extract JSON metadata by analyzing SaveClip.app download buttons."""
@@ -499,15 +688,6 @@ class InstagramExtractor(BaseExtractor):
                     # Use EXACT same logic as working extractor (silent for JSON mode)
                     await page.wait_for_timeout(500)
                     
-                    # Check for and close modal dialog (same as working extractor)
-                    try:
-                        modal_close_selector = '#closeModalBtn, .modal .btn:has-text("Close")'
-                        if await page.is_visible(modal_close_selector):
-                            await page.click(modal_close_selector)
-                            await page.wait_for_timeout(2000)
-                    except:
-                        pass
-                    
                     # Wait for loader to disappear (same as working extractor)
                     try:
                         loader_selector = '#loader-wrapper'
@@ -535,6 +715,10 @@ class InstagramExtractor(BaseExtractor):
                     # Analyze the results using working extractor logic
                     content_analysis = await self._analyze_saveclip_results(page, target_selector, url, post_id)
                     return content_analysis
+                    
+                except Exception as inner_e:
+                    logger.error(f"Error during SaveClip navigation: {inner_e}")
+                    raise
                     
                 finally:
                     await browser.close()
@@ -1003,3 +1187,26 @@ class InstagramExtractor(BaseExtractor):
             return f"{post_id}_{index}.{ext}"
         else:
             return f"{post_id}.{ext}"
+
+    def download_image(self, image_url: str, filename: str) -> Optional[str]:
+        """Download a single image from URL to filename. Returns filepath on success."""
+        try:
+            response = self._http_client.get(image_url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+            
+            # Ensure output directory exists  
+            filepath = Path(self.output_dir) / filename
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Write image data
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_bytes():
+                    f.write(chunk)
+            
+            return str(filepath)
+            
+        except Exception as e:
+            logger.error(f"Failed to download {image_url}: {e}")
+            return None
+
+    # Main method: extract_with_saveclip() - no need for abstract extract() wrapper

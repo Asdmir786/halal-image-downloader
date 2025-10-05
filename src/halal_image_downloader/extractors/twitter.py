@@ -32,8 +32,8 @@ class TwitterExtractor(BaseExtractor):
     """Extractor for Twitter/X.com content."""
     
     def __init__(self, max_retries: int = 3):
-        # Initialize base extractor
-        super().__init__(max_retries=max_retries)
+        # Initialize base extractor with strict mode
+        super().__init__(strict_mode=True)
         
         # Twitter-specific settings
         self.session = requests.Session()
@@ -200,7 +200,7 @@ class TwitterExtractor(BaseExtractor):
     def _fetch_html(self, url: str) -> tuple[str, str]:
         """Fetch HTML with retry logic using Playwright. Returns (html_content, final_url)."""
         async def fetch_with_retry():
-            return await self.retry_with_backoff_async(self._fetch_html_with_playwright_impl, url)
+            return await self.execute_with_error_handling(self._fetch_html_with_playwright_impl, url)
         
         return asyncio.run(fetch_with_retry())
     
@@ -594,16 +594,14 @@ class TwitterExtractor(BaseExtractor):
             logger.error(f"Error extracting images from {url}: {e}")
             return []
     
-    def extract(self, url: str) -> List[Dict[str, Any]]:
-        """Main extraction method - implements BaseExtractor abstract method."""
-        return self.extract_images(url)
+    # Main method: extract_images() - no need for abstract extract() wrapper
     
     def download_image(self, image_url: str, output_path: str) -> bool:
-        """Download a single image from Twitter with retry logic."""
+        """Download a single image from Twitter with strict error handling."""
         try:
-            return self.retry_with_backoff_sync(self._download_image_impl, image_url, output_path)
+            return self.execute_with_error_handling_sync(self._download_image_impl, image_url, output_path)
         except Exception as e:
-            logger.error(f"Failed to download image after all retries: {e}")
+            logger.error(f"Failed to download image: {e}")
             return False
     
     def _download_image_impl(self, image_url: str, output_path: str) -> bool:
@@ -713,6 +711,3 @@ class TwitterExtractor(BaseExtractor):
             logger.error(f"Error validating downloaded image: {e}")
             return False
     
-    def close(self):
-        """Close the session."""
-        self.session.close()

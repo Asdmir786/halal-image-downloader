@@ -7,8 +7,9 @@ from various social media platforms.
 
 from .base_extractor import BaseExtractor
 from .instagram import InstagramExtractor
+from .instagram_direct import InstagramDirectExtractor
 from .pinterest import PinterestExtractor
 from .reddit import RedditExtractor
 from .twitter import TwitterExtractor
 
-__all__ = ['BaseExtractor', 'InstagramExtractor', 'PinterestExtractor', 'RedditExtractor', 'TwitterExtractor']
+__all__ = ['BaseExtractor', 'InstagramExtractor', 'InstagramDirectExtractor', 'PinterestExtractor', 'RedditExtractor', 'TwitterExtractor']
