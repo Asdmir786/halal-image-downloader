@@ -10,8 +10,8 @@ from pathlib import Path
 import time
 import json
 from typing import List, Optional, cast, Dict, Any
-from .extractors.instagram import InstagramExtractor
-from .extractors.instagram_direct import InstagramDirectExtractor
+from .extractors.instagram.saveclip import InstagramExtractor
+from .extractors.instagram.direct import InstagramDirectExtractor
 from .extractors.pinterest import PinterestExtractor
 from .extractors.reddit import RedditExtractor
 from .extractors.twitter import TwitterExtractor
@@ -72,27 +72,42 @@ Tip:
         help='Print various debugging information'
     )
     general.add_argument(
-        '--debug-browser',
+        '--debug',
         action='store_true',
-        help='Run the embedded browser in non-headless (visible) mode for debugging'
+        help='Run in debug (headful) mode'
+    )
+    general.add_argument(
+        '--ig-chrome-channel',
+        action='store_true',
+        help='Instagram only: launch Chrome stable channel for Playwright (requires Google Chrome installed)'
+    )
+    general.add_argument(
+        '--ig-accept-cookies',
+        action='store_true',
+        help='Instagram only: accept cookie banner if present (may be required for media playback)'
     )
     general.add_argument(
         '--debug-wait',
         type=float,
         default=0.0,
         metavar='SECONDS',
-        help='When --debug-browser is used, keep the browser open for SECONDS before closing (default: 0)'
+        help='When --debug is used, keep the browser open for SECONDS (default: 0). If used alone, run headless but delay close and save screenshots.'
     )
     general.add_argument(
-        '--browser',
+        '--install-all-browsers',
+        action='store_true',
+        help='Install all Playwright browsers (chromium, firefox, webkit) and exit if no URL is provided'
+    )
+    general.add_argument(
+        '--install-browser',
         choices=['chromium', 'firefox', 'webkit'],
-        default='chromium',
-        help='Select browser engine for Playwright automation (default: chromium)'
+        help='Install a single Playwright browser and exit if no URL is provided'
     )
     general.add_argument(
         '--install-browsers',
-        action='store_true',
-        help='Install Playwright browser binaries (for the selected --browser) and exit if no URL is provided'
+        nargs='+',
+        choices=['chromium', 'firefox', 'webkit'],
+        help='Install multiple Playwright browsers and exit if no URL is provided'
     )
     # Mode argument removed - only browser mode supported
     general.add_argument(
@@ -538,6 +553,37 @@ Tip:
         help='Extract the images of a playlist'
     )
     
+    # Hide unimplemented/placeholder options from help output (keep parsing intact)
+    unsupported = {
+        # Network
+        '--proxy', '--socket-timeout', '--source-address', '-4', '--force-ipv4', '-6', '--force-ipv6',
+        # Selection
+        '--playlist-items', '--min-filesize', '--max-filesize', '--date', '--datebefore', '--dateafter', '--match-filter',
+        # Download
+        '-r', '--limit-rate', '-R', '--retries', '--fragment-retries', '--skip-unavailable-fragments', '--keep-fragments',
+        '--buffer-size', '--resize-buffer', '--http-chunk-size', '--concurrent-fragments',
+        # Filesystem (keep -o and -E visible)
+        '--output-na-placeholder', '--restrict-filenames', '--windows-filenames', '--trim-names', '-w', '--no-overwrites',
+        '-c', '--continue', '--no-continue', '--no-part', '--no-mtime', '--write-description', '--write-info-json', '--write-comments',
+        '--load-info-json', '--cookies', '--cookies-from-browser', '--no-cookies-from-browser', '--cache-dir', '--no-cache-dir', '--rm-cache-dir',
+        # Format
+        '-f', '--format', '--format-sort', '--format-sort-force', '--no-format-sort-force', '-S', '--format-selector',
+        # Quality (keep --quality visible)
+        '--max-width', '--max-height', '--min-width', '--min-height',
+        # Authentication
+        '-u', '--username', '-p', '--password', '-2', '--twofactor', '-n', '--netrc', '--netrc-location', '--netrc-cmd',
+        # Post-Processing
+        '--convert-images', '--image-quality', '--embed-metadata', '--no-embed-metadata', '--parse-metadata', '--replace-in-metadata', '--exec', '--exec-before-download', '--no-exec',
+        # Configuration
+        '--config-location', '--no-config', '--config-locations', '--flat-playlist', '--no-flat-playlist',
+    }
+    for action in parser._actions:
+        try:
+            if any(opt in unsupported for opt in getattr(action, 'option_strings', [])):
+                action.help = argparse.SUPPRESS
+        except Exception:
+            pass
+
     return parser
 
 
@@ -590,7 +636,7 @@ def _parse_output_option(output: Optional[str], create_dirs: bool = True) -> tup
       side-effects (e.g., in --simulate mode).
 
     """
-    default_filename = "%(title)s.%(ext)s"
+    default_filename = "post_by_%(uploader)s.%(ext)s"
     # No output provided -> cwd + default name
     if not output:
         out_dir = Path('.').resolve()
@@ -703,6 +749,57 @@ def _parse_output_option(output: Optional[str], create_dirs: bool = True) -> tup
     return out_template, out_dir
 
 
+def _render_output_path(
+    out_template: str,
+    mapping: Dict[str, Any],
+    index: Optional[int] = None,
+    total: Optional[int] = None,
+    image_url: Optional[str] = None,
+) -> Path:
+    """Render destination path from a printf-style template and a mapping.
+
+    Supported keys: uploader, title, upload_date, id, ext, playlist_index, autonumber.
+    If template has no index token and total>1, append __{index}of{total} to filename.
+    Ensures parent directories exist.
+    """
+    # Derive extension from mapping or image_url
+    ext = (str(mapping.get("ext")) if mapping.get("ext") else None) or ""
+    if not ext:
+        candidate = image_url or ""
+        m = re.search(r"\.([a-zA-Z0-9]{3,4})(?:[?#].*)?$", candidate)
+        if m:
+            ext = m.group(1).lower()
+    if not ext:
+        ext = "jpg"
+
+    local_map = {
+        "uploader": mapping.get("uploader") or "unknown",
+        "title": mapping.get("title") or mapping.get("fallback_title") or "instagram_image",
+        "upload_date": mapping.get("upload_date") or mapping.get("date") or "NA",
+        "id": mapping.get("id") or "",
+        "ext": ext,
+        "playlist_index": str(index) if index is not None else "",
+        "autonumber": str(index) if index is not None else "",
+    }
+
+    def repl(mo: re.Match) -> str:
+        key = mo.group(1)
+        return str(local_map.get(key, mapping.get("na_placeholder", "NA")))
+
+    rendered = re.sub(r"%\(([^)]+)\)s", repl, out_template)
+    dest = Path(rendered)
+    # Auto-append index suffix if multi-image and no index tokens present
+    if total and total > 1 and index is not None and (
+        "%(playlist_index)s" not in out_template and "%(autonumber)s" not in out_template
+    ):
+        dest = dest.with_name(f"{dest.stem}__{index}of{total}{dest.suffix}")
+
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return dest
+
 def get_platform_name(url: str) -> str:
     """Determine platform name from URL."""
     if "instagram.com" in url:
@@ -721,9 +818,9 @@ def create_extractor(platform: str, args) -> Any:
     """Create appropriate extractor based on platform."""
     if platform == "instagram":
         return InstagramExtractor(
-            headless=not args.debug_browser,
+            headless=not args.debug,
             debug_wait_seconds=args.debug_wait,
-            browser=args.browser
+            browser="chromium",
         )
     elif platform == "pinterest":
         return PinterestExtractor()
@@ -738,41 +835,46 @@ def create_extractor(platform: str, args) -> Any:
 async def analyze_instagram_post(url: str, output_dir: Path, args) -> tuple[Any, bool, List[Dict], Any]:
     """Analyze Instagram post using direct method for metadata + carousel detection.
     Returns: (metadata, is_carousel, images_info, browser_context)
+    Note: Uses analysis-only path that fully closes Playwright to avoid dangling tasks.
     """
-    # Use direct extractor for analysis only (skip_download=True)
     direct_extractor = InstagramDirectExtractor(
         output_dir=str(output_dir),
-        headless=not args.debug_browser,
+        headless=not args.debug,
         debug_wait_seconds=args.debug_wait,
-        browser=args.browser,
-        skip_download=True,  # Analysis only, no downloads
-        interactive_pauses=False,  # Non-interactive for analysis
+        browser="chromium",
+        skip_download=True,
+        interactive_pauses=False,
+        use_chrome_channel=getattr(args, 'ig_chrome_channel', False),
+        ig_accept_cookies=getattr(args, 'ig_accept_cookies', False),
+        quiet=(not args.verbose),
     )
-    
+
     try:
-        # Extract metadata and detect content type, keep browser open
-        metadata, images, browser_context = await direct_extractor._navigate_and_collect_analysis_keep_browser(url)
-        
-        # Detect carousel based on analysis results
+        # Extract metadata and detect content type (no browser reuse; Playwright closed inside)
+        metadata, images = await direct_extractor._navigate_and_collect_analysis_only(url)
+
+        # Detect carousel based on analysis results (analysis-only path uses sentinel URLs)
         is_carousel = (len(images) >= 1 and images[0].get('url') == 'carousel_detected')
-        
+
         print(f"📊 Analysis complete:")
         if metadata.author:
             print(f"   👤 Author: {metadata.author}{'✓' if metadata.verified else ''}")
         if metadata.caption:
             print(f"   📝 Caption: {metadata.caption[:50]}{'...' if len(metadata.caption) > 50 else ''}")
         print(f"   🖼️  Content: {'Carousel' if is_carousel else 'Single image'}")
-        
-        return metadata, is_carousel, images, browser_context
-        
+
+        # Return None for browser_context since we didn't keep it open
+        return metadata, is_carousel, images, None
+
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
-        print(f"❌ Instagram analysis failed: {e}")
-        raise PermanentError from e
+        # Do not print here; outer handler will show a single user-facing error line.
+        # Preserve the error message so outer handlers don't print an empty string
+        raise PermanentError(str(e)) from e
 
 
-def rename_saveclip_files_with_metadata(downloaded_files: List[Path], metadata, post_id: str) -> List[Path]:
-    """Rename SaveClip downloaded files with rich metadata from direct analysis."""
+def rename_saveclip_files_with_metadata(downloaded_files: List[Path], metadata, post_id: str, out_template: str) -> List[Path]:
+    """Rename SaveClip downloaded files using the user's output template and IG metadata."""
     if not metadata or not metadata.author:
         return downloaded_files  # No metadata to apply
     
@@ -784,23 +886,45 @@ def rename_saveclip_files_with_metadata(downloaded_files: List[Path], metadata, 
             # Ensure old_path is a Path object
             old_path = Path(old_path)
             
-            # Build rich filename like direct extractor
-            author = metadata.author
-            ext = old_path.suffix or '.jpg'
-            
-            if total > 1:
-                # Carousel: author__1of3 format
-                new_name = f"instagram_image__by_{author}__{i}of{total}{ext}"
-            else:
-                # Single: author format
-                new_name = f"instagram_image__by_{author}{ext}"
-            
-            new_path = old_path.parent / new_name
+            # Prepare mapping for template rendering
+            # Derive date in YYYYMMDD if available
+            upload_date = None
+            if getattr(metadata, 'published_on', None):
+                try:
+                    from datetime import datetime as _dt
+                    dt = _dt.fromisoformat(metadata.published_on.replace("Z", "+00:00"))
+                    upload_date = dt.strftime("%Y%m%d")
+                except Exception:
+                    digits = re.sub(r"\D", "", metadata.published_on)
+                    upload_date = digits[:8] if len(digits) >= 8 else (digits or None)
+
+            mapping = {
+                "uploader": metadata.author or "unknown",
+                "title": (metadata.caption or "instagram_image"),
+                "upload_date": upload_date or "NA",
+                "id": post_id or "",
+                "ext": (old_path.suffix[1:] if old_path.suffix else "jpg"),
+                "na_placeholder": getattr(metadata, 'na_placeholder', 'NA'),
+            }
+
+            new_path = _render_output_path(
+                out_template,
+                mapping,
+                index=i if total > 1 else None,
+                total=total if total > 1 else None,
+                image_url=None,
+            )
+            # Keep files in same directory if template produced a different dir than current
+            if new_path.parent != old_path.parent and str(new_path).startswith(str(old_path.parent)):
+                pass  # already under same root
             
             # Rename file
             if old_path != new_path:
                 old_path.rename(new_path)
-                print(f"📝 Renamed: {old_path.name} → {new_path.name}")
+                try:
+                    print(f"📝 Renamed: {old_path.name} → {new_path.name}")
+                except Exception:
+                    pass
                 renamed_files.append(new_path)
             else:
                 renamed_files.append(old_path)
@@ -834,15 +958,34 @@ def handle_json_dump(args) -> None:
         if hasattr(extractor, 'extract_json_metadata'):
             json_data = extractor.extract_json_metadata(url)
         else:
-            # Fallback: use regular extract() and format as JSON
+            # Explicit platform-specific fallback (no generic extract())
             if args.verbose:
-                print("Extractor doesn't support JSON metadata, using fallback method", file=sys.stderr)
-            
-            images = extractor.extract(url)
+                print("Using platform-specific fallback method for JSON dump", file=sys.stderr)
+
+            images: List[Dict[str, Any]] = []
+            extraction_method = "fallback"
+
+            if platform == "pinterest":
+                # Pinterest uses extract_images()
+                images = extractor.extract_images(url)
+                extraction_method = "pinterest_extract_images"
+            elif platform == "twitter":
+                # Twitter uses extract_images()
+                images = extractor.extract_images(url)
+                extraction_method = "twitter_extract_images"
+            elif platform == "reddit":
+                # Reddit uses extract_images()
+                images = extractor.extract_images(url)
+                extraction_method = "reddit_extract_images"
+            elif platform == "instagram":
+                # Instagram should have extract_json_metadata; if not, return empty images
+                images = []
+                extraction_method = "instagram_no_fallback"
+
             json_data = {
                 "platform": platform,
                 "url": url,
-                "extraction_method": "fallback",
+                "extraction_method": extraction_method,
                 "images": images,
                 "extractor_version": __version__
             }
@@ -875,18 +1018,35 @@ def main() -> None:
     ):
         print("Tip: You can run this tool as 'hi-dlp' (short) or 'halal-image-downloader' (full).")
 
-    # Allow installing Playwright browsers as a convenience
-    if getattr(args, 'install_browsers', False):
-        browser_to_install = getattr(args, 'browser', 'chromium') or 'chromium'
+    # Playwright browsers install helpers
+    install_all = bool(getattr(args, 'install_all_browsers', False))
+    install_one = getattr(args, 'install_browser', None)
+    install_many = getattr(args, 'install_browsers', None) or []
+
+    # Conflict checks
+    if install_all and (install_one or install_many):
+        parser.error("Use only one of: --install-all-browsers OR --install-browser <name> OR --install-browsers <names>.")
+    if install_one and install_many:
+        parser.error("Use either --install-browser <name> (single) OR --install-browsers <names> (multiple), not both.")
+
+    to_install: list[str] = []
+    if install_all:
+        to_install = ['chromium', 'firefox', 'webkit']
+    elif install_one:
+        to_install = [install_one]
+    elif install_many:
+        to_install = list(dict.fromkeys(install_many))  # de-dup preserving order
+
+    if to_install:
         try:
-            print(f"Installing Playwright browser: {browser_to_install} ...")
-            result = subprocess.run([sys.executable, '-m', 'playwright', 'install', browser_to_install])
-            if result.returncode == 0:
-                print("Playwright browser install complete.")
-            else:
-                print(f"Playwright install exited with code {result.returncode}. You can try running: playwright install {browser_to_install}")
+            print(f"Installing Playwright browsers: {', '.join(to_install)} ...")
+            for b in to_install:
+                result = subprocess.run([sys.executable, '-m', 'playwright', 'install', b])
+                if result.returncode != 0:
+                    print(f"Playwright install for {b} exited with code {result.returncode}. You can try: playwright install {b}")
+            print("Playwright browser install complete.")
         except Exception as e:
-            print(f"Failed to install Playwright browser: {e}")
+            print(f"Failed to install Playwright browser(s): {e}")
         # If no URL was provided, exit after installation
         if not getattr(args, 'url', None):
             sys.exit(0)
@@ -980,24 +1140,30 @@ def main() -> None:
     # Determine platform and extract images
     try:
         if "instagram.com" in args.url:
-            print("🔍 Platform: Instagram detected")
-            print("🚀 Method: Hybrid extraction (analysis + download)")
-            headless = not args.debug_browser
+            print("🔍 Platform: Instagram")
+            headless = not args.debug
             output_dir = out_dir
             
             if args.verbose:
                 print(f"Browser mode: {'headless' if headless else 'visible (debug)'}")
-                print(f"Browser engine: {args.browser}")
+                print("Browser engine: chromium")
                 print(f"Output directory (absolute): {output_dir}")
             
             start_ts = time.perf_counter()
             
             try:
-                # Phase 1: Analyze post with direct method (metadata + carousel detection)
-                print("\n🔍 Phase 1: Analyzing post structure and metadata...")
+                # Analyze post (minimal)
+                print("\n🔎 Analyzing post...")
+                # Use analysis-only path that fully closes Playwright (no context reuse)
+                # to avoid TargetClosedError warnings from dangling tasks.
                 metadata, is_carousel, images_info, browser_context = asyncio.run(
                     analyze_instagram_post(args.url, output_dir, args)
                 )
+                # Minimal status
+                try:
+                    print("Found: " + ("carousel" if is_carousel else "single image"))
+                except Exception:
+                    pass
                 
                 async def phase2_download():
                     """Async wrapper for Phase 2 downloads"""
@@ -1012,51 +1178,76 @@ def main() -> None:
                     
                     # Phase 2: Choose download method based on content type
                     if is_carousel:
-                        print(f"\n📁 Phase 2: Downloading carousel via SaveClip...")
+                        print(f"\n⬇️  Downloading...")
                         # Use SaveClip extractor for carousel downloads
                         saveclip_extractor = InstagramExtractor(
                             output_dir=str(output_dir),
                             headless=headless,
                             debug_wait_seconds=args.debug_wait,
-                            browser=args.browser,
+                            browser="chromium",
+                            quiet=(not args.verbose),
                         )
                         files = await saveclip_extractor.extract_with_saveclip(args.url)
                         return files
                     else:
-                        print("\n🖼️  Phase 2: Downloading single image via direct method...")
+                        print("\n⬇️  Downloading...")
                         # Use direct extractor for fast single image download
                         direct_extractor = InstagramDirectExtractor(
                             output_dir=str(output_dir),
                             headless=headless,
                             debug_wait_seconds=args.debug_wait,
-                            browser=args.browser,
+                            browser="chromium",
+                            output_template=out_template,
                             skip_download=False,  # Enable download
                             interactive_pauses=False,
+                            use_chrome_channel=getattr(args, 'ig_chrome_channel', False),
+                            ig_accept_cookies=getattr(args, 'ig_accept_cookies', False),
+                            quiet=(not args.verbose),
                         )
                         files = await direct_extractor._download_from_analysis(args.url, metadata, images_info)
                         return files
                 
                 if args.skip_download:
-                    # Run async close browser function
-                    asyncio.run(phase2_download())
-                    
-                    # Just list what would be downloaded
-                    if not images_info:
-                        print("❌ No downloadable images found on this Instagram post.")
-                        sys.exit(1)
-                    
-                    print("\n--skip-download specified; listing images only:")
-                    for i, img_info in enumerate(images_info, 1):
-                        if metadata and metadata.author:
-                            if is_carousel:
-                                filename = f"instagram_image__by_{metadata.author}__{i}of{len(images_info)}.jpg"
-                            else:
-                                filename = f"instagram_image__by_{metadata.author}.jpg"
-                        else:
-                            filename = f"instagram_image_{i}.jpg"
-                        dest = output_dir / filename
-                        print(f"  🖼  {img_info.get('url', 'N/A')} -> {dest.resolve()}")
-                    
+                    # For carousels, we can't easily list URLs without full SaveClip navigation
+                    # Show a summary instead
+                    if is_carousel:
+                        print("\n--skip-download specified for carousel:")
+                        print(f"   📦 Carousel detected (multiple images)")
+                        print(f"   👤 Author: {metadata.author or 'unknown'}")
+                        if metadata.caption:
+                            print(f"   📝 Caption: {metadata.caption[:60]}{'...' if len(metadata.caption) > 60 else ''}")
+                        print(f"\n   ℹ️  Carousel images will be downloaded via SaveClip when --skip-download is not used")
+                        print(f"   📁 Destination pattern: {out_template}")
+                    else:
+                        # Single image - use direct extractor data
+                        if not images_info:
+                            print("❌ No downloadable images found on this Instagram post.")
+                            sys.exit(1)
+
+                        print("\n--skip-download specified; planned downloads:")
+                        total = len(images_info)
+                        for idx, item in enumerate(images_info, start=1):
+                            img_url = item.get('url', '')
+                            mapping = {
+                                "uploader": metadata.author or "unknown",
+                                "title": metadata.caption or "instagram_image",
+                                "upload_date": "NA",
+                                "id": InstagramDirectExtractor.extract_post_id(args.url) or "",
+                                "ext": None,
+                            }
+                            dest = _render_output_path(
+                                out_template,
+                                mapping,
+                                index=(idx if total > 1 else None),
+                                total=(total if total > 1 else None),
+                                image_url=img_url,
+                            )
+                            try:
+                                dest_show = dest.resolve()
+                            except Exception:
+                                dest_show = dest
+                            print(f"  🖼  {img_url} -> {dest_show}")
+
                     elapsed = time.perf_counter() - start_ts
                     print(f"\n⏱ Total time: {elapsed:.2f}s")
                     sys.exit(0)
@@ -1068,16 +1259,72 @@ def main() -> None:
                 if downloaded_files and metadata and is_carousel:
                     post_id = InstagramDirectExtractor.extract_post_id(args.url)
                     downloaded_files = rename_saveclip_files_with_metadata(
-                        downloaded_files, metadata, post_id or "unknown"
+                        downloaded_files, metadata, post_id or "unknown", out_template
                     )
             
             except Exception as e:
-                logger.error(f"Hybrid Instagram extraction failed: {e}")
-                print(f"❌ Error: {e}")
-                if args.verbose:
-                    import traceback
-                    traceback.print_exc()
-                sys.exit(1)
+                # Minimal error and fallback to SaveClip if analysis couldn't locate image
+                err_msg = str(e)
+                if ("Could not locate main image" in err_msg) and (not args.skip_download):
+                    try:
+                        print("Analyzer couldn't locate image. Falling back to SaveClip...")
+                        # Use SaveClip JSON analysis to avoid verbose output, then download quietly
+                        saveclip = InstagramExtractor(
+                            output_dir=str(output_dir),
+                            headless=headless,
+                            debug_wait_seconds=args.debug_wait,
+                            browser="chromium",
+                            quiet=True,
+                        )
+                        data = saveclip.extract_json_metadata(args.url)
+                        downloads = [d for d in data.get('available_downloads', []) if isinstance(d, dict) and d.get('type') == 'image' and d.get('download_url')]
+                        if not downloads:
+                            raise PermanentError("No image links found via SaveClip")
+                        total = len(downloads)
+                        downloaded_files = []
+                        print(f"⬇️  Downloading {total} image(s)...")
+                        for i, item in enumerate(downloads, start=1):
+                            durl = item.get('download_url')
+                            mapping = {
+                                "uploader": "unknown",
+                                "title": "instagram_image",
+                                "upload_date": "NA",
+                                "id": data.get('post_id') or "",
+                                "ext": None,
+                            }
+                            dest = _render_output_path(
+                                out_template,
+                                mapping,
+                                index=(i if total > 1 else None),
+                                total=(total if total > 1 else None),
+                                image_url=durl,
+                            )
+                            # Compute relative filename under output_dir
+                            try:
+                                rel = dest.relative_to(output_dir)
+                            except Exception:
+                                rel = dest.name
+                            # Use SaveClip core downloader (quiet)
+                            try:
+                                path_str = saveclip.download_image(durl, str(rel))
+                                downloaded_files.append(Path(path_str))
+                            except Exception as de:
+                                raise PermanentError(f"Download failed: {de}")
+                        print("✅ Done.")
+                    except Exception as fe:
+                        logger.error(f"Fallback failed: {fe}")
+                        print(f"❌ Error: {fe}")
+                        if args.verbose:
+                            import traceback
+                            traceback.print_exc()
+                        sys.exit(1)
+                else:
+                    logger.error(f"Hybrid Instagram extraction failed: {e}")
+                    print(f"❌ Error: {e}")
+                    if args.verbose:
+                        import traceback
+                        traceback.print_exc()
+                    sys.exit(1)
             
             elapsed = time.perf_counter() - start_ts
             
@@ -1103,7 +1350,8 @@ def main() -> None:
 
             start_ts = time.perf_counter()
             extractor = PinterestExtractor()
-            # Extract only images (videos auto-skipped inside the extractor)
+            # Get pin info for templating and extract only images (videos auto-skipped)
+            pin_info = extractor.get_pin_info(args.url)
             images = extractor.extract_images(args.url)
 
             if not images:
@@ -1113,16 +1361,43 @@ def main() -> None:
             saved: List[Path] = []
             if args.skip_download:
                 print("--skip-download specified; listing images only:")
-                for item in images:
-                    print(f"  🖼  {item['url']} -> {item['filename']}")
+                total = len(images)
+                for idx, item in enumerate(images, start=1):
+                    img_url = item['url']
+                    # Build mapping for template
+                    m = re.search(r"\.([a-zA-Z0-9]{3,4})(?:[?#].*)?$", img_url)
+                    ext = (m.group(1).lower() if m else (item.get('format') or 'jpg'))
+                    mapping = {
+                        "uploader": "unknown",
+                        "title": pin_info.get('title') or f"Pinterest Pin {pin_info.get('id','pin')}",
+                        "upload_date": "NA",
+                        "id": pin_info.get('id') or "",
+                        "ext": ext,
+                    }
+                    dest = _render_output_path(out_template, mapping, index=idx if total > 1 else None, total=total if total > 1 else None, image_url=img_url)
+                    try:
+                        print(f"  🖼  {img_url} -> {dest.resolve()}")
+                    except Exception:
+                        print(f"  🖼  {img_url} -> {dest}")
             else:
-                for item in images:
-                    dest = output_dir / item['filename']
-                    ok = extractor.download_image(item['url'], str(dest))
+                total = len(images)
+                for idx, item in enumerate(images, start=1):
+                    img_url = item['url']
+                    m = re.search(r"\.([a-zA-Z0-9]{3,4})(?:[?#].*)?$", img_url)
+                    ext = (m.group(1).lower() if m else (item.get('format') or 'jpg'))
+                    mapping = {
+                        "uploader": "unknown",
+                        "title": pin_info.get('title') or f"Pinterest Pin {pin_info.get('id','pin')}",
+                        "upload_date": "NA",
+                        "id": pin_info.get('id') or "",
+                        "ext": ext,
+                    }
+                    dest = _render_output_path(out_template, mapping, index=idx if total > 1 else None, total=total if total > 1 else None, image_url=img_url)
+                    ok = extractor.download_image(img_url, str(dest))
                     if ok:
-                        saved.append(dest)
+                        saved.append(Path(dest))
                     else:
-                        print(f"⚠️  Failed to download {item['url']}")
+                        print(f"⚠️  Failed to download {img_url}")
 
             elapsed = time.perf_counter() - start_ts
             if saved:
@@ -1146,8 +1421,10 @@ def main() -> None:
 
             start_ts = time.perf_counter()
             extractor = RedditExtractor()
-            # Extract images from Reddit post or subreddit
-            images = extractor.extract(args.url)
+            # Extract images from Reddit post or subreddit (no generic extract())
+            json_url = extractor.convert_to_json_url(args.url)
+            reddit_json = extractor._fetch_json(json_url)
+            images = extractor.extract_images_from_post_data(reddit_json)
 
             if not images:
                 print("❌ No downloadable images found on this Reddit post/subreddit.")
@@ -1156,16 +1433,43 @@ def main() -> None:
             saved: List[Path] = []
             if args.skip_download:
                 print("--skip-download specified; listing images only:")
-                for item in images:
-                    print(f"  🖼  {item['url']} -> {item['filename']}")
+                total = len(images)
+                for idx, item in enumerate(images, start=1):
+                    img_url = item['url']
+                    # Build mapping from item fields
+                    m = re.search(r"\.([a-zA-Z0-9]{3,4})(?:[?#].*)?$", img_url)
+                    ext = (m.group(1).lower() if m else 'jpg')
+                    mapping = {
+                        "uploader": item.get('author') or 'unknown',
+                        "title": item.get('title') or 'reddit_image',
+                        "upload_date": 'NA',
+                        "id": item.get('post_id') or '',
+                        "ext": ext,
+                    }
+                    dest = _render_output_path(out_template, mapping, index=idx if total > 1 else None, total=total if total > 1 else None, image_url=img_url)
+                    try:
+                        print(f"  🖼  {img_url} -> {dest.resolve()}")
+                    except Exception:
+                        print(f"  🖼  {img_url} -> {dest}")
             else:
-                for item in images:
-                    dest = output_dir / item['filename']
-                    ok = extractor.download_image(item['url'], str(dest))
+                total = len(images)
+                for idx, item in enumerate(images, start=1):
+                    img_url = item['url']
+                    m = re.search(r"\.([a-zA-Z0-9]{3,4})(?:[?#].*)?$", img_url)
+                    ext = (m.group(1).lower() if m else 'jpg')
+                    mapping = {
+                        "uploader": item.get('author') or 'unknown',
+                        "title": item.get('title') or 'reddit_image',
+                        "upload_date": 'NA',
+                        "id": item.get('post_id') or '',
+                        "ext": ext,
+                    }
+                    dest = _render_output_path(out_template, mapping, index=idx if total > 1 else None, total=total if total > 1 else None, image_url=img_url)
+                    ok = extractor.download_image(img_url, str(dest))
                     if ok:
-                        saved.append(dest)
+                        saved.append(Path(dest))
                     else:
-                        print(f"⚠️  Failed to download {item['url']}")
+                        print(f"⚠️  Failed to download {img_url}")
 
             elapsed = time.perf_counter() - start_ts
             if saved:
@@ -1189,8 +1493,13 @@ def main() -> None:
 
             start_ts = time.perf_counter()
             extractor = TwitterExtractor()
+            # Respect quality preference
+            try:
+                setattr(extractor, 'preferred_quality', getattr(args, 'quality', 'best'))
+            except Exception:
+                pass
             # Extract images from Twitter post (with interactive mixed media handling)
-            images = extractor.extract(args.url)
+            images = extractor.extract_images(args.url)
 
             if not images:
                 print("❌ No downloadable images found on this tweet.")
@@ -1199,16 +1508,56 @@ def main() -> None:
             saved: List[Path] = []
             if args.skip_download:
                 print("--skip-download specified; listing images only:")
-                for item in images:
-                    print(f"  🖼  {item['url']} -> {item['filename']}")
+                total = len(images)
+                # Gather minimal meta for templating
+                try:
+                    tweet_id = extractor.extract_tweet_id(args.url) or ""
+                    username = extractor.extract_username(args.url) or "unknown"
+                except Exception:
+                    tweet_id, username = "", "unknown"
+                for idx, item in enumerate(images, start=1):
+                    img_url = item['url']
+                    # Determine ext via query param or path
+                    m_q = re.search(r"[?&]format=([a-zA-Z0-9]{3,4})", img_url)
+                    m_p = re.search(r"\.([a-zA-Z0-9]{3,4})(?:[?#].*)?$", img_url)
+                    ext = (m_q.group(1).lower() if m_q else (m_p.group(1).lower() if m_p else 'jpg'))
+                    mapping = {
+                        "uploader": username,
+                        "title": "twitter_image",
+                        "upload_date": 'NA',
+                        "id": tweet_id,
+                        "ext": ext,
+                    }
+                    dest = _render_output_path(out_template, mapping, index=idx if total > 1 else None, total=total if total > 1 else None, image_url=img_url)
+                    try:
+                        print(f"  🖼  {img_url} -> {dest.resolve()}")
+                    except Exception:
+                        print(f"  🖼  {img_url} -> {dest}")
             else:
-                for item in images:
-                    dest = output_dir / item['filename']
-                    ok = extractor.download_image(item['url'], str(dest))
+                total = len(images)
+                try:
+                    tweet_id = extractor.extract_tweet_id(args.url) or ""
+                    username = extractor.extract_username(args.url) or "unknown"
+                except Exception:
+                    tweet_id, username = "", "unknown"
+                for idx, item in enumerate(images, start=1):
+                    img_url = item['url']
+                    m_q = re.search(r"[?&]format=([a-zA-Z0-9]{3,4})", img_url)
+                    m_p = re.search(r"\.([a-zA-Z0-9]{3,4})(?:[?#].*)?$", img_url)
+                    ext = (m_q.group(1).lower() if m_q else (m_p.group(1).lower() if m_p else 'jpg'))
+                    mapping = {
+                        "uploader": username,
+                        "title": "twitter_image",
+                        "upload_date": 'NA',
+                        "id": tweet_id,
+                        "ext": ext,
+                    }
+                    dest = _render_output_path(out_template, mapping, index=idx if total > 1 else None, total=total if total > 1 else None, image_url=img_url)
+                    ok = extractor.download_image(img_url, str(dest))
                     if ok:
-                        saved.append(dest)
+                        saved.append(Path(dest))
                     else:
-                        print(f"⚠️  Failed to download {item['url']}")
+                        print(f"⚠️  Failed to download {img_url}")
 
             elapsed = time.perf_counter() - start_ts
             if saved:

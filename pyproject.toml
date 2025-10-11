@@ -1,6 +1,6 @@
 [project]
 name = "halal-image-downloader"
-version = "2025.10.06"
+version = "2025.10.12"
 description = "A command-line tool for fast and reliable image downloading from supported sources."
 readme = "README.md"
 authors = [

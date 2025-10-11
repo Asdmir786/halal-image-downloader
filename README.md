@@ -2,8 +2,8 @@
 
 A command-line tool for fast and reliable image downloading from supported social media sources.
 
-[![Version](https://img.shields.io/badge/version-2025.10.06-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
-[![Python](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
+[![Version](https://img.shields.io/badge/version-2025.10.12-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
+[![Python](https://img.shields.io/badge/python-3.11%2B%20(tested%203.13)-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](LICENSE)
 
 ## Description
@@ -13,15 +13,13 @@ A command-line tool for fast and reliable image downloading from supported socia
 ## Features
 
 - 🚀 **Fast downloads** with concurrent processing
-- 🎯 **Multiple format support** (JPG, PNG, WebP, original)
-- 📱 **Social media platform support** (Instagram, Pinterest, Reddit)
-- 🔄 **Carousel/album downloading** with selective item support
-- 📊 **Quality selection** (best, worst, original, custom resolution)
-- 🛡️ **Authentication support** (cookies, login credentials)
-- 📝 **Metadata extraction** and embedding
-- 🎨 **Post-processing** with image conversion
-- ⚙️ **Extensive configuration** options
-- 🔍 **Simulation mode** for testing without downloading
+- 🖼️ **Images only** (videos are detected and clearly rejected)
+- 📱 **Supported platforms**: Instagram, Pinterest, Reddit, Twitter/X.com
+- 🔄 **Carousel/album downloading**
+- 📊 **Quality selection**: Twitter supports original/large/small via `--quality`; others use best available
+- 🧩 **Output templates across all platforms** with `-o/--output`
+- 🧪 **Simulation (`--simulate`) and planning (`--skip-download`)**
+- 🧭 **Instagram debugging** with headless/visible browser and one-click Playwright install
 
 ## Installation
 
@@ -107,8 +105,11 @@ hi-dlp "https://reddit.com/r/ABC/comments/abc123/beautiful_sunset"
 # Download Pinterest pins
 hi-dlp "https://pinterest.com/pin/123456789"
 
-# Download with specific format and quality
-hi-dlp "https://instagram.com/p/ABC123" --format jpg --quality best
+# Download Twitter/X.com images
+hi-dlp "https://x.com/username/status/123456789"
+
+# Download with specific quality
+hi-dlp "https://x.com/username/status/123456789" --quality original
 
 # Simulate download (don't actually download)
 hi-dlp "https://instagram.com/p/ABC123" --simulate
@@ -131,38 +132,23 @@ hi-dlp "https://pinterest.com/pin/987654321"
 # Download with custom output directory
 hi-dlp "https://reddit.com/r/Art" -o ./downloads
 
-# Download specific items from carousel (items 1, 3, and 5-10)
-hi-dlp "https://instagram.com/p/ABC123" --playlist-items "1,3,5-10"
+# Download Twitter images
+hi-dlp "https://x.com/username/status/123456789"
 ```
 
-### Quality and Format Control
+### Quality
 
 ```bash
-# Download best quality images
-hi-dlp "URL" --quality best
+# Twitter: original quality
+hi-dlp "https://x.com/username/status/123456789" --quality original
 
-# Download in specific format
-hi-dlp "URL" --format jpg
-
-# Download with size constraints
-hi-dlp "URL" --max-width 1920 --max-height 1080
-
-# Convert images after download
-hi-dlp "URL" --convert-images png --image-quality 95
+# Default is best (large). Use worst for smaller files
+hi-dlp "https://x.com/username/status/123456789" --quality worst
 ```
 
-### Advanced Options
+### Verbosity
 
 ```bash
-# Download with metadata
-hi-dlp "URL" --write-info-json --write-description
-
-# Use cookies for authentication
-hi-dlp "URL" --cookies cookies.txt
-
-# Rate limiting
-hi-dlp "URL" --limit-rate 1M
-
 # Verbose output
 hi-dlp "URL" --verbose
 
@@ -172,53 +158,34 @@ hi-dlp "URL" --quiet
 
 ### Date Filtering
 
-```bash
-# Download images from specific date (YYYYMMDD)
-hi-dlp "URL" --date YYYYMMDD
-
-# Download images after specific date (YYYYMMDD)
-hi-dlp "URL" --dateafter YYYYMMDD
-
-# Download images before specific date (YYYYMMDD)
-hi-dlp "URL" --datebefore YYYYMMDD
-```
+Not supported currently.
 
 ## Command Line Options
 
-### General Options
+### General
 - `--version` - Show version and exit
 - `-U, --update` - Update to latest version
-- `-V, --verbose` - Enable verbose output
-- `-q, --quiet` - Enable quiet mode
-- `-s, --simulate` - Simulate download without actually downloading
+- `-V, --verbose` - Verbose output
+- `-q, --quiet` - Quiet mode
+- `-s, --simulate` - Do not download, just simulate
+- `--skip-download` - List planned downloads with final paths
+- `-J, --dump-json` - Dump JSON metadata (platform-specific)
 
-### Download Options
-- `-o, --output TEMPLATE` - Output filename template
-- `-f, --format FORMAT` - Image format preference
-- `--quality {best,worst,original}` - Quality selection
-- `-r, --limit-rate RATE` - Download rate limit
-- `-R, --retries RETRIES` - Number of retries (default: 10)
+### Instagram / Browser
+- `--debug` - Run Playwright in headful (visible) mode; default is headless
+- `--debug-wait SECONDS` - Keep the browser open for SECONDS or delay close when headless
+- `--install-all-browsers` - Install all Playwright browsers (chromium, firefox, webkit)
+- `--install-browser {chromium|firefox|webkit}` - Install a single Playwright browser
+- `--install-browsers {chromium firefox webkit}` - Install multiple Playwright browsers
+- `--ig-chrome-channel` - Use Chrome stable channel (chromium engine)
+- `--ig-accept-cookies` - Try accepting IG cookie banner
 
-### Selection Options
-- `--playlist-items ITEMS` - Specific items to download (e.g., "1,3,5-10")
-- `--min-filesize SIZE` - Minimum file size filter
-- `--max-filesize SIZE` - Maximum file size filter
-- `--date DATE` - Download only from specific date
-- `--datebefore DATE` - Download only before date
-- `--dateafter DATE` - Download only after date
+### Filesystem
+- `-o, --output TEMPLATE` - Output filename template (applies to all platforms)
+- `-E, --ensure-output-dir` - Create output directory if missing
 
-### Authentication Options
-- `-u, --username USERNAME` - Login username
-- `-p, --password PASSWORD` - Login password
-- `--cookies FILE` - Cookie file path
-- `--cookies-from-browser BROWSER` - Extract cookies from browser
-
-### Post-Processing Options
-- `--convert-images FORMAT` - Convert to different format
-- `--image-quality QUALITY` - Image quality for conversion (0-100)
-- `--embed-metadata` - Embed metadata in images
-- `--write-info-json` - Write metadata to .info.json
-- `--write-description` - Write description to .description file
+### Quality
+- `--quality {best,worst,original}` - Preferred quality. Twitter supports `original` (`orig`), others use best available
 
 For complete list of options, run:
 ```bash
@@ -229,10 +196,10 @@ halal-image-downloader --help
 
 ## Supported Platforms
 
-- 📸 **Instagram** - Posts, carousels, galleries (images only, videos skipped)
-- 📌 **Pinterest** - Pins, image boards (images only, videos skipped)
-- 🤖 **Reddit** - Post images, galleries, subreddit images (pure image content)
-- 🔗 **Generic** - Direct image URLs
+- 📸 **Instagram** - Posts, carousels (images only, videos skipped)
+- 📌 **Pinterest** - Pins (images only, videos skipped)
+- 🤖 **Reddit** - Post images, galleries (images only)
+- 🐦 **Twitter/X.com** - Tweet images and carousels (images only)
 
 ### Platform-Specific Features
 
@@ -270,6 +237,14 @@ hi-dlp "URL" -o "%(uploader)s/%(title)s.%(ext)s"
 # Date-based organization
 hi-dlp "URL" -o "%(upload_date)s/%(id)s.%(ext)s"
 ```
+
+Notes:
+- If a post has multiple images and your template does not include an index token (`%(playlist_index)s` or `%(autonumber)s`), the tool auto-appends `__{index}of{total}` to avoid overwriting.
+- Simple tokens are supported for readability: `author`, `title`, `date`, `id`, `ext`, `idx`, `cnt`.
+  - Letter shortcuts: `u`=`author`, `t`=`title`, `d`=`date`, `i`=`id`, `e`=`ext`, `n`=`idx`, `c`=`cnt`.
+  - Examples: `-o "author/title.ext"`, `-o "u_t_e"`.
+- Path rules: leading `/` or `\` resolves under your home directory; `./` and `../` resolve relative to the current working directory.
+- If the filename part lacks an extension, `.%(ext)s` is automatically appended.
 
 ### Reddit Mixed Media Handling
 
@@ -331,22 +306,7 @@ The full `%(...)s` templates are still supported and will be used unchanged when
 
 ### Configuration File
 
-Create a configuration file at `~/.config/halal-image-downloader/config` or use `--config-location`:
-
-```ini
-# Default output directory
---output ~/Downloads/%(uploader)s/%(title)s.%(ext)s
-
-# Default quality
---quality best
-
-# Always write metadata
---write-info-json
---embed-metadata
-
-# Rate limiting
---limit-rate 2M
-```
+Not supported currently. Set flags on the command line or via your shell aliases.
 
 ## Development
 
@@ -388,11 +348,11 @@ halal-image-downloader/
 │       ├── cli.py              # Command-line interface
 │       └── extractors/         # Platform-specific extractors
 │           ├── __init__.py
-│           ├── base_extractor.py  # Shared functionality
-│           ├── instagram.py       # Instagram extractor
-│           ├── pinterest.py       # Pinterest extractor
-│           └── reddit.py          # Reddit extractor
-├── tests/                      # Test suite
+│           ├── base_extractor.py
+│           ├── instagram/      # Instagram (direct + SaveClip)
+│           ├── pinterest/      # Pinterest
+│           ├── reddit/         # Reddit
+│           └── twitter/        # Twitter/X.com
 ├── pyproject.toml             # Project configuration
 ├── uv.lock                    # Dependency lock file
 └── README.md                  # This file

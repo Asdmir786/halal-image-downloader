@@ -151,5 +151,5 @@ class BaseExtractor(ABC):
     # - InstagramExtractor: extract_with_saveclip()
     # - InstagramDirectExtractor: discover() 
     # - PinterestExtractor: extract_images()
-    # - RedditExtractor: extract()
+    # - RedditExtractor: extract_images()
     # - TwitterExtractor: extract_images()
