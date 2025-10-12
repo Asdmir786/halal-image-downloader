@@ -2,7 +2,7 @@
 
 A command-line tool for fast and reliable image downloading from supported social media sources.
 
-[![Version](https://img.shields.io/badge/version-2025.10.12.1-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
+[![Version](https://img.shields.io/badge/version-2025.10.12.2-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
 [![Python](https://img.shields.io/badge/python-3.11%2B%20(tested%203.14)-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](LICENSE)
 
@@ -20,6 +20,8 @@ A command-line tool for fast and reliable image downloading from supported socia
 - 🧩 **Output templates across all platforms** with `-o/--output`
 - 🧪 **Simulation (`--simulate`) and planning (`--skip-download`)**
 - 🧭 **Instagram debugging** with headless/visible browser and one-click Playwright install
+- 🌐 **Smart browser selection**: Auto-tries Chrome → Edge → Chromium for best compatibility
+- 🔒 **Age restriction detection**: Auto-fallback to SaveClip for restricted Instagram profiles
 
 ## Installation
 
@@ -111,6 +113,9 @@ hi-dlp "https://x.com/username/status/123456789"
 # Download with specific quality
 hi-dlp "https://x.com/username/status/123456789" --quality original
 
+# Use a specific browser engine
+hi-dlp "https://instagram.com/p/ABC123" --browser firefox
+
 # Simulate download (don't actually download)
 hi-dlp "https://instagram.com/p/ABC123" --simulate
 ```
@@ -174,6 +179,7 @@ Not supported currently.
 ### Instagram / Browser
 - `--debug` - Run Playwright in headful (visible) mode; default is headless
 - `--debug-wait SECONDS` - Keep the browser open for SECONDS or delay close when headless
+- `--browser {chromium|firefox|webkit}` - Browser engine to use (default: Google Chrome via chromium engine, auto-tries Chrome → Edge → Playwright Chromium)
 - `--install-all-browsers` - Install all Playwright browsers (chromium, firefox, webkit)
 - `--install-browser {chromium|firefox|webkit}` - Install a single Playwright browser
 - `--install-browsers {chromium firefox webkit}` - Install multiple Playwright browsers

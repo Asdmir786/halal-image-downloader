@@ -13,6 +13,7 @@ from ...base_extractor import (
     logger,
     RateLimitError, ServiceUnavailableError, InvalidUrlError, NetworkError, PermanentError
 )
+from ....utils.browser import launch_browser_smart
 
 
 class SaveClipNavigationMixin:
@@ -26,13 +27,18 @@ class SaveClipNavigationMixin:
         async with async_playwright() as p:
             browser = None
             try:
-                # Launch selected browser engine (default: Firefox for lightweight resource usage)
-                launch_kwargs = {"headless": self.headless}
+                # Use smart browser launcher (tries Chrome -> Edge -> Chromium/Firefox/Webkit)
+                launch_kwargs = {}
                 if not self.headless:
                     # Make interactions a bit slower for visibility in debug
                     launch_kwargs["slow_mo"] = 150
-                engine = getattr(p, self.browser_engine, p.firefox)
-                browser = await engine.launch(**launch_kwargs)
+                
+                browser = await launch_browser_smart(
+                    p,
+                    browser_type=self.browser_engine,
+                    headless=self.headless,
+                    **launch_kwargs
+                )
                 context = await browser.new_context(
                     user_agent=self.ua.random,
                     viewport={'width': 1024, 'height': 720},
@@ -110,107 +116,64 @@ class SaveClipNavigationMixin:
 
                 # Click the download button with enhanced reliability
                 self._print("Clicking download button...")
+                # Based on the HTML: <button type="button" onclick="..." class="btn btn-default"><b>Download</b></button>
                 download_btn_selectors = [
+                    'button.btn.btn-default:has-text("Download")',  # Most specific
                     'button:has-text("Download")',
+                    '.input-group-btn button:has-text("Download")',
+                    'button[onclick*="ksearchvideo"]',
                     '.btn:has-text("Download")',
-                    'input[type="submit"][value*="Download"]',
-                    'a:has-text("Download")',
-                    '#download-btn',
-                    '.download-button'
                 ]
 
-                download_btn_clicked = False
+                clicked = False
                 for btn_sel in download_btn_selectors:
                     try:
+                        self._print(f"Trying selector: {btn_sel}")
                         if await page.is_visible(btn_sel):
                             await page.click(btn_sel)
-                            download_btn_selector = btn_sel  # Store for later re-clicks
-                            download_btn_clicked = True
-                            self._print(f"Successfully clicked download button: {btn_sel}")
+                            clicked = True
+                            self._print(f"✓ Clicked Download button")
                             break
                     except Exception as e:
-                        self._print(f"Failed to click {btn_sel}: {e}")
+                        self._print(f"Failed: {e}")
                         continue
 
-                if not download_btn_clicked:
-                    raise Exception("Could not find or click any download button")
-
-                # Wait for processing
-                self._print("Waiting for processing...")
-                await page.wait_for_timeout(500)  # quick settle
-
-                # If SaveClip shows the loader, wait until it disappears
-                try:
-                    loader_selector = '#loader-wrapper'
-                    loader_visible = await page.is_visible(loader_selector)
-                    # Also check computed style in case visibility API is misleading
-                    loader_display = None
+                if not clicked:
                     try:
-                        loader_display = await page.eval_on_selector(loader_selector, 'el => getComputedStyle(el).display')
+                        await page.screenshot(path='saveclip_no_button.png')
+                        self._print("Screenshot saved to saveclip_no_button.png")
                     except Exception:
                         pass
-                    if loader_visible or loader_display == 'block':
-                        self._print("Loader detected. Waiting for processing to complete...")
-                        # Wait for it to become hidden or removed
-                        try:
-                            await page.wait_for_selector(loader_selector, state='hidden', timeout=15000)
-                        except Exception:
-                            # Fallback to a short grace period if it didn't hide in time
-                            await page.wait_for_timeout(2000)
-                except Exception:
-                    pass
+                    raise ServiceUnavailableError("Could not find download button on SaveClip.app")
 
-                # Directly wait for the exact "Download Image" anchors as specified
-                target_selector = (
-                    'div.download-items__btn > '
-                    'a[id^="photo_dl_"][href*="dl.snapcdn.app/saveinsta"][title^="Download Photo"]:has-text("Download Image")'
-                )
-
-                # Try to find results with retry logic
+                # Target selector for download links in the results box
+                # Use a broad selector to catch all download links
+                target_selector = '#search-result a[href*="dl.snapcdn.app"]'
+                
+                # Actively check for buttons while waiting (up to 15 seconds)
+                # Check every 500ms for buttons to appear
+                self._print("Waiting for SaveClip to process (checking every 0.5s for up to 15s)...")
                 matched_links = []
-                retry_attempted = False
-
-                for attempt in range(2):  # Try twice
+                max_wait_ms = 15000
+                check_interval_ms = 500
+                elapsed_ms = 0
+                
+                while elapsed_ms < max_wait_ms:
                     try:
-                        await page.wait_for_selector(target_selector, state='visible', timeout=8000)
-                        matched_links = await page.query_selector_all(target_selector)
-                        content_type = "carousel" if len(matched_links) > 1 else "single image"
-                        self._print(f"✅ Found Instagram {content_type} - {len(matched_links)} image(s) detected")
-                        break  # Success, exit retry loop
+                        # Check if buttons are visible
+                        count = await page.locator(target_selector).count()
+                        if count > 0:
+                            # Found buttons! Get them immediately
+                            matched_links = await page.query_selector_all(target_selector)
+                            content_type = "carousel" if len(matched_links) > 1 else "single image"
+                            self._print(f"✅ Found Instagram {content_type} - {len(matched_links)} image(s) detected (after {elapsed_ms/1000:.1f}s)")
+                            break
                     except Exception:
-                        # Check if loader is still running
-                        loader_still_running = False
-                        try:
-                            loader_selector = '#loader-wrapper'
-                            loader_visible = await page.is_visible(loader_selector)
-                            loader_display = None
-                            try:
-                                loader_display = await page.eval_on_selector(loader_selector, 'el => getComputedStyle(el).display')
-                            except Exception:
-                                pass
-                            loader_still_running = loader_visible or loader_display == 'block'
-                        except Exception:
-                            pass
-
-                        # If no loader AND no results AND haven't retried yet, try clicking download again
-                        if not loader_still_running and not retry_attempted and attempt == 0:
-                            self._print("No loader or results found. Trying to click download button again...")
-                            retry_attempted = True
-                            try:
-                                # Try to click download button again using same selectors
-                                for btn_sel in download_btn_selectors:
-                                    try:
-                                        if await page.is_visible(btn_sel):
-                                            await page.click(btn_sel)
-                                            self._print(f"Re-clicked download button: {btn_sel}")
-                                            await page.wait_for_timeout(3000)  # Wait longer after re-click
-                                            break
-                                    except Exception as e:
-                                        continue
-                            except Exception:
-                                pass
-                        else:
-                            break  # No retry or already retried, exit loop
+                        pass
+                    
+                    # Wait a bit before next check
+                    await page.wait_for_timeout(check_interval_ms)
+                    elapsed_ms += check_interval_ms
 
                 # Check for videos in the carousel (even if we have images)
                 video_selector = (
@@ -369,10 +332,10 @@ class SaveClipNavigationMixin:
             return await self._extract_with_saveclip_impl_with_page(instagram_url, page)
 
         finally:
-            # Close browser at the end
+            # Close only the temporary page; keep shared context/browser alive
             try:
-                await browser_context.close()
-            except:
+                await page.close()
+            except Exception:
                 pass
 
     async def _extract_with_saveclip_impl_with_page(self, instagram_url: str, page):
@@ -441,11 +404,8 @@ class SaveClipNavigationMixin:
             except Exception:
                 pass
 
-            # Try to find results with retry logic (same as main method)
-            target_selector = (
-                'div.download-items__btn > '
-                'a[id^="photo_dl_"][href*="dl.snapcdn.app/saveinsta"][title^="Download Photo"]:has-text("Download Image")'
-            )
+            # Use EXACT SaveClip download button selector (from user's HTML analysis)
+            target_selector = 'button.btn.btn-default:has(b:text("Download"))'
 
             matched_links = []
             retry_attempted = False

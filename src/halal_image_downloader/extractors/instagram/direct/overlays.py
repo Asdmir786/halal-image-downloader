@@ -129,17 +129,37 @@ class DirectOverlaysMixin:
         except Exception:
             return False
 
+    async def _check_age_restriction_gate(self, page) -> bool:
+        """Check if Instagram is showing age restriction gate (25+ required).
+        Returns True if age restriction is detected."""
+        try:
+            # Look for key indicators of age restriction
+            age_restriction_indicators = [
+                "text='Restricted profile'",
+                "text='You must be 25 years old'",
+                "text=/You must be \\d+ years old.*to see this profile/i",
+                "text='Log in to continue'"
+            ]
+            
+            for indicator in age_restriction_indicators:
+                try:
+                    loc = page.locator(indicator).first
+                    if await loc.count() > 0:
+                        return True
+                except Exception:
+                    continue
+            
+            return False
+        except Exception:
+            return False
+
     async def _dismiss_overlays(self, page) -> None:
         """Handle only the 'Continue on the web' interstitial by default.
         If --ig-accept-cookies is enabled, also accept cookie banners.
         """
-        print("Checking for 'Continue on the web' interstitial...", flush=True)
         try:
             if await self._try_click_continue_on_web(page):
-                try:
-                    print("- Clicked 'Continue on the web'", flush=True)
-                except Exception:
-                    pass
+                print("Clicked 'Continue on the web'", flush=True)
         except Exception:
             pass
 

@@ -11,6 +11,7 @@ from ...base_extractor import (
     logger,
     RateLimitError, ServiceUnavailableError, InvalidUrlError,
 )
+from ....utils.browser import launch_browser_smart
 
 
 class SaveClipAnalysisMixin:
@@ -28,10 +29,12 @@ class SaveClipAnalysisMixin:
 
         try:
             async with async_playwright() as p:
-                engine = getattr(p, self.browser_engine)
-                launch_kwargs = {"headless": self.headless}
-
-                browser = await engine.launch(**launch_kwargs)
+                # Use smart browser launcher (tries Chrome -> Edge -> Chromium)
+                browser = await launch_browser_smart(
+                    p,
+                    browser_type=self.browser_engine,
+                    headless=self.headless
+                )
                 context = await browser.new_context(
                     user_agent=self.ua.random,
                     viewport={'width': 1024, 'height': 720},
@@ -70,39 +73,175 @@ class SaveClipAnalysisMixin:
                     input_selector = 'input[name="q"], input#s_input'
                     await page.wait_for_selector(input_selector, timeout=10000)
                     await page.fill(input_selector, url)
+                    
+                    # Wait a moment for JavaScript to be ready
+                    await page.wait_for_timeout(500)
 
-                    # Click download button (silent for JSON mode)
+                    # Click the main Download button next to the input
+                    # Based on the HTML you provided: <button type="button" onclick="..." class="btn btn-default"><b>Download</b></button>
                     download_btn_selectors = [
+                        'button.btn.btn-default:has-text("Download")',  # Most specific
                         'button:has-text("Download")',
+                        '.input-group-btn button:has-text("Download")',
+                        'button[onclick*="ksearchvideo"]',
                         '.btn:has-text("Download")',
-                        'input[type="submit"][value*="Download"]',
-                        'a:has-text("Download")',
-                        '#download-btn',
-                        '.download-button'
                     ]
 
                     clicked = False
                     for btn_sel in download_btn_selectors:
                         try:
+                            logger.info(f"Trying to click button with selector: {btn_sel}")
                             if await page.is_visible(btn_sel):
-                                await page.click(btn_sel)
+                                # Try direct click first
+                                await page.click(btn_sel, timeout=2000)
                                 clicked = True
+                                logger.info(f"Successfully clicked Download button with selector: {btn_sel}")
+                                
+                                # Also try to trigger the onclick handler directly as backup
+                                try:
+                                    await page.evaluate('''
+                                        () => {
+                                            const btn = document.querySelector('button.btn.btn-default');
+                                            if (btn && btn.onclick) {
+                                                btn.onclick();
+                                            }
+                                        }
+                                    ''')
+                                    logger.info("Also triggered onclick handler directly")
+                                except Exception:
+                                    pass
+                                
                                 break
-                        except Exception:
+                            else:
+                                logger.debug(f"Button not visible: {btn_sel}")
+                        except Exception as e:
+                            logger.debug(f"Failed to click {btn_sel}: {e}")
                             continue
 
                     if not clicked:
+                        # Take screenshot to see what's on the page
+                        try:
+                            await page.screenshot(path='saveclip_no_button.png')
+                            logger.error("Screenshot saved to saveclip_no_button.png")
+                        except Exception:
+                            pass
                         raise ServiceUnavailableError("Could not find download button on SaveClip.app")
 
-                    # Use EXACT same selector as working extractor
-                    target_selector = (
-                        'div.download-items__btn > '
-                        'a[id^="photo_dl_"][href*="dl.snapcdn.app/saveinsta"][title^="Download Photo"]:has-text("Download Image")'
-                    )
-
-                    # Analyze the results using the same logic
-                    content_analysis = await self._analyze_saveclip_results(page, target_selector, url, post_id or "")
-                    return content_analysis
+                    # Target selector for download links in the results box
+                    # Use a broad selector first to see what's available
+                    target_selector = '#search-result a[href*="dl.snapcdn.app"]'
+                    
+                    # Actively check for buttons while waiting (up to 15 seconds)
+                    # Check every 500ms for buttons to appear
+                    matched_links = []
+                    max_wait_ms = 15000
+                    check_interval_ms = 500
+                    elapsed_ms = 0
+                    
+                    logger.info(f"Starting active polling for Download Image buttons (max {max_wait_ms/1000}s)...")
+                    
+                    while elapsed_ms < max_wait_ms:
+                        try:
+                            # Check if buttons are visible
+                            count = await page.locator(target_selector).count()
+                            logger.debug(f"Check at {elapsed_ms/1000:.1f}s: found {count} buttons")
+                            if count > 0:
+                                # Found buttons! Get them immediately
+                                matched_links = await page.query_selector_all(target_selector)
+                                logger.info(f"Found {len(matched_links)} Download Image buttons after {elapsed_ms/1000:.1f}s")
+                                break
+                        except Exception as e:
+                            logger.debug(f"Error checking buttons at {elapsed_ms/1000:.1f}s: {e}")
+                            pass
+                        
+                        # Wait a bit before next check
+                        await page.wait_for_timeout(check_interval_ms)
+                        elapsed_ms += check_interval_ms
+                    
+                    if not matched_links:
+                        logger.error(f"No Download Image buttons found after {max_wait_ms/1000}s")
+                        # Take screenshot for debugging
+                        try:
+                            await page.screenshot(path='saveclip_timeout.png')
+                            logger.info("Screenshot saved to saveclip_timeout.png")
+                        except Exception:
+                            pass
+                    
+                    # If we found links, extract them
+                    if matched_links:
+                        # Extract download URLs from <a> tags, filtering out videos
+                        available_downloads = []
+                        video_count = 0
+                        
+                        for i, link in enumerate(matched_links):
+                            try:
+                                href = await link.get_attribute('href')
+                                title = await link.get_attribute('title') or ''
+                                text = (await link.inner_text()).strip() if await link.inner_text() else ''
+                                
+                                logger.info(f"Link {i}: href={href}, title={title}, text={text}")
+                                
+                                # Skip video links
+                                if 'video' in title.lower() or 'video' in text.lower():
+                                    video_count += 1
+                                    logger.info(f"Skipping video link: {title}")
+                                    continue
+                                
+                                if href and href.startswith('http'):
+                                    available_downloads.append({
+                                        'type': 'image',
+                                        'index': len(available_downloads) + 1,
+                                        'filename': f"{post_id}_{len(available_downloads) + 1}.jpg" if len(matched_links) > 1 else f"{post_id}.jpg",
+                                        'button_text': text,
+                                        'download_url': href,
+                                        'title': title
+                                    })
+                                    logger.info(f"Added image download URL: {href}")
+                                else:
+                                    logger.warning(f"Link {i} has invalid href: {href}")
+                            except Exception as e:
+                                logger.warning(f"Could not extract link {i}: {e}")
+                                continue
+                        
+                        image_count = len(available_downloads)
+                        
+                        # video_count already set during filtering above
+                        if video_count > 0:
+                            logger.info(f"Found {video_count} video(s) in post (skipped - images only)")
+                        
+                        content_type = 'image' if image_count == 1 else 'carousel_images_only'
+                        
+                        return {
+                            'platform': 'instagram',
+                            'url': url,
+                            'post_id': post_id,
+                            'content_type': content_type,
+                            'extraction_method': 'saveclip_image_extractor',
+                            'extraction_timestamp': datetime.now().isoformat(),
+                            'counts': {
+                                'total_items': image_count + video_count,
+                                'images': image_count,
+                                'videos': video_count
+                            },
+                            'available_downloads': available_downloads,
+                            'saveclip_analysis': True
+                        }
+                    else:
+                        # No image links found - check if it's a video-only post
+                        video_count = 0
+                        try:
+                            video_selector = '.download-items__btn a[title*="Download Video"]'
+                            video_links = await page.query_selector_all(video_selector)
+                            video_count = len(video_links)
+                        except Exception:
+                            pass
+                        
+                        if video_count > 0:
+                            # Video-only post
+                            raise ServiceUnavailableError(f"Post contains only video content ({video_count} video(s)). This tool downloads images only.")
+                        else:
+                            # No content found at all
+                            raise ServiceUnavailableError("No Download Image buttons found after 15 seconds")
 
                 except Exception as inner_e:
                     logger.error(f"Error during SaveClip navigation: {inner_e}")
@@ -215,18 +354,32 @@ class SaveClipAnalysisMixin:
     async def _analyze_saveclip_results(self, page, target_selector: str, url: str, post_id: str) -> Dict[str, Any]:
         """Analyze SaveClip results using exact same logic as working extractor."""
         matched_links = []
-        try:
-            # Use exact same wait and selector logic as working extractor
-            await page.wait_for_selector(target_selector, state='visible', timeout=8000)
-            matched_links = await page.query_selector_all(target_selector)
-
-        except Exception:
-            # Silent error handling for JSON mode - no diagnostic prints
+        
+        # Try with retry logic (SaveClip might need more time for age-restricted content)
+        for attempt in range(3):
             try:
-                body_text = await page.evaluate("document.body.innerText")
-                # Store error info for potential JSON output but don't print
-            except Exception:
-                pass
+                # Use exact same wait and selector logic as working extractor
+                await page.wait_for_selector(target_selector, state='visible', timeout=8000)
+                matched_links = await page.query_selector_all(target_selector)
+                if matched_links:
+                    break  # Success!
+                # If no links found, wait a bit and retry
+                if attempt < 2:
+                    await page.wait_for_timeout(2000)
+            except Exception as e:
+                # If timeout on last attempt, check what's on the page
+                if attempt == 2:
+                    try:
+                        # Take screenshot for debugging if in debug mode
+                        if not getattr(self, 'headless', True):
+                            await page.screenshot(path='saveclip_no_results.png')
+                        body_text = await page.evaluate("document.body.innerText")
+                        logger.warning(f"SaveClip analysis failed after 3 attempts. Page text sample: {body_text[:200]}")
+                    except Exception:
+                        pass
+                else:
+                    # Not last attempt, wait and retry
+                    await page.wait_for_timeout(2000)
 
         # Analyze results exactly like working extractor
         if matched_links:
@@ -281,7 +434,17 @@ class SaveClipAnalysisMixin:
             }
 
         else:
-            # --- NO IMAGES FOUND, CHECK FOR VIDEO ---
+            # --- NO IMAGES FOUND, TRY GENERIC BUTTON ANALYSIS BEFORE VIDEO CHECK ---
+            try:
+                buttons = await self._analyze_download_buttons(page)
+            except Exception:
+                buttons = []
+
+            if buttons:
+                # Classify based on discovered buttons (image/video/mixed)
+                return self._classify_instagram_content(buttons, url, post_id)
+
+            # --- STILL NO IMAGES, CHECK FOR VIDEO ---
             video_selector = 'a[title^="Download Video"]:has-text("Download Video")'
             video_links = []
             try:

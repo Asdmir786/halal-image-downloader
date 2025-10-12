@@ -94,6 +94,12 @@ Tip:
         help='When --debug is used, keep the browser open for SECONDS (default: 0). If used alone, run headless but delay close and save screenshots.'
     )
     general.add_argument(
+        '--browser',
+        choices=['chromium', 'firefox', 'webkit'],
+        default='chromium',
+        help='Browser engine to use (default: chromium). For chromium, tries Chrome -> Edge -> Playwright Chromium in order.'
+    )
+    general.add_argument(
         '--install-all-browsers',
         action='store_true',
         help='Install all Playwright browsers (chromium, firefox, webkit) and exit if no URL is provided'
@@ -820,7 +826,7 @@ def create_extractor(platform: str, args) -> Any:
         return InstagramExtractor(
             headless=not args.debug,
             debug_wait_seconds=args.debug_wait,
-            browser="chromium",
+            browser=args.browser,
         )
     elif platform == "pinterest":
         return PinterestExtractor()
@@ -841,7 +847,7 @@ async def analyze_instagram_post(url: str, output_dir: Path, args) -> tuple[Any,
         output_dir=str(output_dir),
         headless=not args.debug,
         debug_wait_seconds=args.debug_wait,
-        browser="chromium",
+        browser=args.browser,
         skip_download=True,
         interactive_pauses=False,
         use_chrome_channel=getattr(args, 'ig_chrome_channel', False),
@@ -1152,179 +1158,68 @@ def main() -> None:
             start_ts = time.perf_counter()
             
             try:
-                # Analyze post (minimal)
+                # Phase 1: Analyze post to get metadata and detect carousel
                 print("\n🔎 Analyzing post...")
-                # Use analysis-only path that fully closes Playwright (no context reuse)
-                # to avoid TargetClosedError warnings from dangling tasks.
-                metadata, is_carousel, images_info, browser_context = asyncio.run(
+                metadata, is_carousel, images_info, _ = asyncio.run(
                     analyze_instagram_post(args.url, output_dir, args)
                 )
-                # Minimal status
-                try:
-                    print("Found: " + ("carousel" if is_carousel else "single image"))
-                except Exception:
-                    pass
+                
+                # Show analysis results
+                if metadata.author:
+                    print(f"   👤 Author: {metadata.author}")
+                print(f"   🖼️  Content: {'Carousel' if is_carousel else 'Single image'}")
                 
                 async def phase2_download():
-                    """Async wrapper for Phase 2 downloads"""
+                    """Async wrapper for downloads"""
                     if args.skip_download:
-                        # Close browser since we're not downloading
-                        if browser_context:
-                            try:
-                                await browser_context.close()
-                            except:
-                                pass
+                        print("--skip-download specified, skipping download")
                         return []
                     
-                    # Phase 2: Choose download method based on content type
+                    print(f"\n⬇️  Downloading...")
+                    
                     if is_carousel:
-                        print(f"\n⬇️  Downloading...")
-                        # Use SaveClip extractor for carousel downloads
+                        # For carousels: Use SaveClip to download
                         saveclip_extractor = InstagramExtractor(
                             output_dir=str(output_dir),
                             headless=headless,
                             debug_wait_seconds=args.debug_wait,
-                            browser="chromium",
+                            browser=args.browser,
                             quiet=(not args.verbose),
                         )
                         files = await saveclip_extractor.extract_with_saveclip(args.url)
                         return files
                     else:
-                        print("\n⬇️  Downloading...")
-                        # Use direct extractor for fast single image download
+                        # For single images: Use direct method
                         direct_extractor = InstagramDirectExtractor(
                             output_dir=str(output_dir),
                             headless=headless,
                             debug_wait_seconds=args.debug_wait,
-                            browser="chromium",
+                            browser=args.browser,
                             output_template=out_template,
-                            skip_download=False,  # Enable download
+                            skip_download=False,
                             interactive_pauses=False,
-                            use_chrome_channel=getattr(args, 'ig_chrome_channel', False),
-                            ig_accept_cookies=getattr(args, 'ig_accept_cookies', False),
                             quiet=(not args.verbose),
                         )
                         files = await direct_extractor._download_from_analysis(args.url, metadata, images_info)
                         return files
                 
-                if args.skip_download:
-                    # For carousels, we can't easily list URLs without full SaveClip navigation
-                    # Show a summary instead
-                    if is_carousel:
-                        print("\n--skip-download specified for carousel:")
-                        print(f"   📦 Carousel detected (multiple images)")
-                        print(f"   👤 Author: {metadata.author or 'unknown'}")
-                        if metadata.caption:
-                            print(f"   📝 Caption: {metadata.caption[:60]}{'...' if len(metadata.caption) > 60 else ''}")
-                        print(f"\n   ℹ️  Carousel images will be downloaded via SaveClip when --skip-download is not used")
-                        print(f"   📁 Destination pattern: {out_template}")
-                    else:
-                        # Single image - use direct extractor data
-                        if not images_info:
-                            print("❌ No downloadable images found on this Instagram post.")
-                            sys.exit(1)
-
-                        print("\n--skip-download specified; planned downloads:")
-                        total = len(images_info)
-                        for idx, item in enumerate(images_info, start=1):
-                            img_url = item.get('url', '')
-                            mapping = {
-                                "uploader": metadata.author or "unknown",
-                                "title": metadata.caption or "instagram_image",
-                                "upload_date": "NA",
-                                "id": InstagramDirectExtractor.extract_post_id(args.url) or "",
-                                "ext": None,
-                            }
-                            dest = _render_output_path(
-                                out_template,
-                                mapping,
-                                index=(idx if total > 1 else None),
-                                total=(total if total > 1 else None),
-                                image_url=img_url,
-                            )
-                            try:
-                                dest_show = dest.resolve()
-                            except Exception:
-                                dest_show = dest
-                            print(f"  🖼  {img_url} -> {dest_show}")
-
-                    elapsed = time.perf_counter() - start_ts
-                    print(f"\n⏱ Total time: {elapsed:.2f}s")
-                    sys.exit(0)
-                
-                # Run Phase 2 downloads
+                # Run downloads
                 downloaded_files = asyncio.run(phase2_download())
                 
-                # Apply rich metadata to filenames for carousel
-                if downloaded_files and metadata and is_carousel:
+                # Rename carousel files with metadata
+                if downloaded_files and is_carousel and metadata:
                     post_id = InstagramDirectExtractor.extract_post_id(args.url)
                     downloaded_files = rename_saveclip_files_with_metadata(
                         downloaded_files, metadata, post_id or "unknown", out_template
                     )
             
             except Exception as e:
-                # Minimal error and fallback to SaveClip if analysis couldn't locate image
-                err_msg = str(e)
-                if ("Could not locate main image" in err_msg) and (not args.skip_download):
-                    try:
-                        print("Analyzer couldn't locate image. Falling back to SaveClip...")
-                        # Use SaveClip JSON analysis to avoid verbose output, then download quietly
-                        saveclip = InstagramExtractor(
-                            output_dir=str(output_dir),
-                            headless=headless,
-                            debug_wait_seconds=args.debug_wait,
-                            browser="chromium",
-                            quiet=True,
-                        )
-                        data = saveclip.extract_json_metadata(args.url)
-                        downloads = [d for d in data.get('available_downloads', []) if isinstance(d, dict) and d.get('type') == 'image' and d.get('download_url')]
-                        if not downloads:
-                            raise PermanentError("No image links found via SaveClip")
-                        total = len(downloads)
-                        downloaded_files = []
-                        print(f"⬇️  Downloading {total} image(s)...")
-                        for i, item in enumerate(downloads, start=1):
-                            durl = item.get('download_url')
-                            mapping = {
-                                "uploader": "unknown",
-                                "title": "instagram_image",
-                                "upload_date": "NA",
-                                "id": data.get('post_id') or "",
-                                "ext": None,
-                            }
-                            dest = _render_output_path(
-                                out_template,
-                                mapping,
-                                index=(i if total > 1 else None),
-                                total=(total if total > 1 else None),
-                                image_url=durl,
-                            )
-                            # Compute relative filename under output_dir
-                            try:
-                                rel = dest.relative_to(output_dir)
-                            except Exception:
-                                rel = dest.name
-                            # Use SaveClip core downloader (quiet)
-                            try:
-                                path_str = saveclip.download_image(durl, str(rel))
-                                downloaded_files.append(Path(path_str))
-                            except Exception as de:
-                                raise PermanentError(f"Download failed: {de}")
-                        print("✅ Done.")
-                    except Exception as fe:
-                        logger.error(f"Fallback failed: {fe}")
-                        print(f"❌ Error: {fe}")
-                        if args.verbose:
-                            import traceback
-                            traceback.print_exc()
-                        sys.exit(1)
-                else:
-                    logger.error(f"Hybrid Instagram extraction failed: {e}")
-                    print(f"❌ Error: {e}")
-                    if args.verbose:
-                        import traceback
-                        traceback.print_exc()
-                    sys.exit(1)
+                logger.error(f"Error: {e}")
+                print(f"❌ Error: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+                sys.exit(1)
             
             elapsed = time.perf_counter() - start_ts
             

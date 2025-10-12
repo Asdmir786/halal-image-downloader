@@ -17,7 +17,7 @@ from fake_useragent import UserAgent
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("hi-dlp")
 
 # Suppress verbose HTTP logs from httpx and requests
 logging.getLogger("httpx").setLevel(logging.WARNING)

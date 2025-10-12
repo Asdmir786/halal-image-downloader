@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from playwright.async_api import async_playwright
 
+from ....utils.browser import launch_browser_smart
 from .core import DirectPostMetadata
 from .media import DirectMediaMixin
 from .overlays import DirectOverlaysMixin
@@ -119,6 +120,12 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
         except Exception:
             pass
 
+        # Wait for page ready
+        try:
+            await page.wait_for_selector('body', timeout=5000)
+        except Exception:
+            pass
+
         # Try to dismiss overlays/interstitials/cookies with multiple attempts
         try:
             self._print("Handling overlays/interstitials...")
@@ -133,18 +140,22 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
             except Exception:
                 pass
 
-        # Prime page for lazy-loaded media
+        # Check for age restriction gate after page loads
         try:
-            await page.wait_for_selector('article', timeout=7000)
+            if await self._check_age_restriction_gate(page):
+                self._print("Age restriction detected - using SaveClip")
+                raise ServiceUnavailableError("Age restriction detected - will fallback to SaveClip")
+        except ServiceUnavailableError:
+            raise  # Re-raise to trigger SaveClip fallback
         except Exception:
-            pass
+            pass  # Continue with normal flow if check fails
+
+        # Wait for main images using selector system (not phantom 'article')
         try:
-            await page.evaluate('window.scrollBy(0, 400)')
-            await page.wait_for_timeout(300)
-            await page.evaluate('window.scrollBy(0, -400)')
-            await page.wait_for_timeout(200)
+            main_img_selector = get_playwright_selector(MAIN_IMAGE_SELECTORS)
+            await page.wait_for_selector(main_img_selector, timeout=3000)
         except Exception:
-            pass
+            raise ServiceUnavailableError("No Instagram images found on page")
 
         # Reject videos early (carousels supported for images)
         kind = await self._detect_video_or_carousel(page)
@@ -296,10 +307,12 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
             page = None
             try:
                 engine = getattr(p, self.browser_engine)
-                launch_kwargs = {"headless": self.headless}
-                if self.browser_engine == "chromium" and getattr(self, "use_chrome_channel", False):
-                    launch_kwargs["channel"] = "chrome"
-                browser = await engine.launch(**launch_kwargs)
+                # Use smart browser launcher
+                browser = await launch_browser_smart(
+                    p,
+                    browser_type=self.browser_engine,
+                    headless=self.headless
+                )
                 context = await browser.new_context(
                     viewport={'width': 1024, 'height': 720},
                 )
@@ -314,34 +327,46 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
                 except Exception:
                     pass
 
-                # Handle overlays
+                # Wait for page ready
                 try:
-                    await asyncio.wait_for(self._dismiss_overlays(page), timeout=8)
+                    await page.wait_for_selector('body', timeout=5000)
                 except Exception:
                     pass
 
-                # Prime page for lazy-loaded media
+                # Handle overlays after page loads
                 try:
-                    await page.wait_for_selector('article', timeout=7000)
+                    await asyncio.wait_for(self._dismiss_overlays(page), timeout=3)
                 except Exception:
                     pass
+
+                # Check for age restriction gate EARLY (before waiting for images)
                 try:
-                    await page.evaluate('window.scrollBy(0, 400)')
-                    await page.wait_for_timeout(300)
-                    await page.evaluate('window.scrollBy(0, -400)')
-                    await page.wait_for_timeout(200)
+                    if await self._check_age_restriction_gate(page):
+                        self._print("Age restriction detected - using SaveClip")
+                        raise ServiceUnavailableError("Age restriction detected - will fallback to SaveClip")
+                except ServiceUnavailableError:
+                    raise  # Re-raise to trigger SaveClip fallback
                 except Exception:
-                    pass
+                    pass  # Continue with normal flow if check fails
+
+                # Wait for main images using selector system
+                try:
+                    main_img_selector = get_playwright_selector(MAIN_IMAGE_SELECTORS)
+                    await page.wait_for_selector(main_img_selector, timeout=3000)
+                except Exception:
+                    raise ServiceUnavailableError("No Instagram images found on page")
 
                 # Reject video posts early in analysis-only flow
                 kind = await self._detect_video_or_carousel(page)
                 if kind == "video_post":
                     raise PermanentError("This post appears to be a video. Image-only is supported right now.")
 
-                # Wait for main image
+                # Quick main image validation (reduced timeout)
+                self._print("Locating main image...")
                 ok = await self._wait_for_main_image(page)
                 if not ok:
                     raise ServiceUnavailableError("Could not locate main image for analysis.")
+                self._print("Main image located.")
 
                 # Extract minimal metadata (author + image_url only) for Phase 1
                 meta = await self._extract_minimal_metadata_for_analysis(page)
@@ -392,10 +417,12 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
         """
         async with async_playwright() as p:
             engine = getattr(p, self.browser_engine)
-            launch_kwargs = {"headless": self.headless}
-            if self.browser_engine == "chromium" and getattr(self, "use_chrome_channel", False):
-                launch_kwargs["channel"] = "chrome"
-            browser = await engine.launch(**launch_kwargs)
+            # Use smart browser launcher
+            browser = await launch_browser_smart(
+                p,
+                browser_type=self.browser_engine,
+                headless=self.headless
+            )
             context = await browser.new_context(
                 viewport={'width': 1024, 'height': 720},
             )
@@ -509,10 +536,16 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
         async def _discover(url: str) -> List[Dict[str, Any]]:
             async with async_playwright() as p:
                 engine = getattr(p, self.browser_engine)
-                launch_kwargs = {"headless": self.headless}
+                # Use smart browser launcher
+                launch_kwargs = {}
                 if not self.headless:
                     launch_kwargs["slow_mo"] = 150
-                browser = await engine.launch(**launch_kwargs)
+                browser = await launch_browser_smart(
+                    p,
+                    browser_type=self.browser_engine,
+                    headless=self.headless,
+                    **launch_kwargs
+                )
                 try:
                     context = await browser.new_context(
                         user_agent=self.ua.random,
@@ -626,10 +659,16 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
 
         async with async_playwright() as p:
             engine = getattr(p, self.browser_engine)
-            launch_kwargs = {"headless": self.headless}
+            # Use smart browser launcher
+            launch_kwargs = {}
             if not self.headless:
                 launch_kwargs["slow_mo"] = 150
-            browser = await engine.launch(**launch_kwargs)
+            browser = await launch_browser_smart(
+                p,
+                browser_type=self.browser_engine,
+                headless=self.headless,
+                **launch_kwargs
+            )
             try:
                 context = await browser.new_context(
                     user_agent=self.ua.random,

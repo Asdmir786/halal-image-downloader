@@ -7,15 +7,16 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .core import DirectPostMetadata
 from .selectors import (
+    MAIN_IMAGE_SELECTORS,
     CAROUSEL_NEXT_SELECTORS,
     CAROUSEL_PREV_SELECTORS,
-    MAIN_IMAGE_SELECTORS,
-    IMAGE_CONTAINER_SELECTORS,
+    CAROUSEL_INDICATORS_SELECTORS,
     USERNAME_SELECTORS,
     VERIFIED_BADGE_SELECTORS,
     TIMESTAMP_SELECTOR,
     LIKES_SELECTOR,
     CAPTION_SELECTORS,
+    IMAGE_CONTAINER_SELECTORS,
     get_playwright_selector,
     get_js_selector_chain,
     get_selector_list,
@@ -25,21 +26,44 @@ from ...base_extractor import logger
 
 class DirectMediaMixin:
     async def _is_carousel(self, page) -> bool:
-        """Determine if the current post is a carousel by presence of controls only.
-        Uses robust aria-label selectors from config instead of fragile class names.
-        """
+        """Fast carousel detection using tiered selectors."""
         try:
-            # Use selectors from config - semantic and stable
+            # Method 1: Check for carousel indicators in page content
+            is_carousel_js = await page.evaluate("""
+                () => {
+                    // Check for carousel-specific elements
+                    const hasCarouselIndicators = document.querySelector('div[role="button"][tabindex="0"]') !== null;
+                    const hasNextButton = document.querySelector('button[aria-label*="Next"]') !== null;
+                    const hasPrevButton = document.querySelector('button[aria-label*="Go back"]') !== null;
+                    const hasMultipleDots = document.querySelectorAll('div._acnb, div[style*="background"]').length > 1;
+                    
+                    // Check meta tags
+                    const ogType = document.querySelector('meta[property="og:type"]');
+                    const isCarouselMeta = ogType && ogType.content && ogType.content.includes('carousel');
+                    
+                    return hasCarouselIndicators || hasNextButton || hasPrevButton || hasMultipleDots || isCarouselMeta;
+                }
+            """)
+            
+            if is_carousel_js:
+                return True
+            
+            # Method 2: Use selector system for carousel indicators
+            indicators_selector = get_playwright_selector(CAROUSEL_INDICATORS_SELECTORS)
+            indicator_count = await page.locator(indicators_selector).count()
+            if indicator_count > 1:
+                return True
+                
+            # Method 3: Fallback to next/prev buttons using selector system
             next_selector = get_playwright_selector(CAROUSEL_NEXT_SELECTORS)
             next_count = await page.locator(next_selector).count()
-        except Exception:
-            next_count = 0
-        try:
+            
             prev_selector = get_playwright_selector(CAROUSEL_PREV_SELECTORS)
             prev_count = await page.locator(prev_selector).count()
+            
+            return (next_count > 0) or (prev_count > 0)
         except Exception:
-            prev_count = 0
-        return (next_count > 0) or (prev_count > 0)
+            return False
 
     async def _detect_video_or_carousel(self, page) -> Optional[str]:
         """Return 'video_post' if a video is detected; otherwise None."""
@@ -48,9 +72,8 @@ class DirectMediaMixin:
                 """
                 () => {
                   const videoSelectors = [
-                    'article div.x5yr21d video',
-                    'article video',
-                    'main video'
+                    'video',  // Any video element
+                    'div[role="presentation"] video'
                   ];
                   let hasVideo = false;
                   for (const sel of videoSelectors) {
@@ -80,59 +103,36 @@ class DirectMediaMixin:
         return None
 
     async def _wait_for_main_image(self, page) -> bool:
-        # Wait for any of the likely main image candidates to have a usable source (~15s total)
-        # Use robust selectors from config
-        selector_str = get_playwright_selector(MAIN_IMAGE_SELECTORS)
-        logger.debug(f"Waiting for main image with selectors: {selector_str}")
-        
+        # Fast detection using tiered selector system (3s max)
         try:
+            # Use the configured selector system
+            selector_str = get_playwright_selector(MAIN_IMAGE_SELECTORS)
+            
             await page.wait_for_function(
                 f"""
                 () => {{
-                  // Use config-based selectors (robust, not class-dependent)
+                  // Use tiered selectors from config
                   const selectors = '{selector_str}'.split(', ');
-                  let candidates = [];
-                  for (const sel of selectors) {{
-                    try {{
-                      const found = Array.from(document.querySelectorAll(sel.trim()));
-                      candidates = candidates.concat(found);
-                    }} catch(e) {{
-                      console.error('Selector failed:', sel, e);
+                  
+                  for (const selector of selectors) {{
+                    const images = document.querySelectorAll(selector.trim());
+                    for (const img of images) {{
+                      // Validate it's a proper content image
+                      const r = img.getBoundingClientRect();
+                      if ((r?.width || 0) >= 200 && (r?.height || 0) >= 200) {{
+                        return true;
+                      }}
                     }}
                   }}
-
-                  function isContentImage(img) {{
-                    if (!img) return false;
-                    // Exclude header/nav images
-                    const inHeader = !!img.closest('header, nav');
-                    if (inHeader) return false;
-                    // Exclude profile pictures (selector should already do this, but double-check)
-                    const alt = (img.getAttribute('alt') || img.alt || '').toLowerCase();
-                    if (alt.includes('profile picture') || alt.includes('avatar')) return false;
-                    // Require a reasonably sized image to avoid tiny icons
-                    const r = img.getBoundingClientRect();
-                    if ((r?.width || 0) < 128 || (r?.height || 0) < 128) return false;
-                    const src = img.getAttribute('src') || img.currentSrc || '';
-                    const srcset = img.getAttribute('srcset') || '';
-                    return !!(src || srcset);
-                  }}
-
-                  for (const img of candidates) {{
-                    if (isContentImage(img)) {{
-                      console.log('Found valid content image');
-                      return true;
-                    }}
-                  }}
-                  console.log('No valid content image found yet');
                   return false;
                 }}
                 """,
-                timeout=15000,
+                timeout=3000,
             )
-            logger.debug("Main image found successfully")
+            logger.debug("Main Instagram image found using selector system")
             return True
         except PlaywrightTimeoutError:
-            logger.warning("Timeout waiting for main image")
+            logger.warning("Timeout waiting for main image using selector system")
             return False
 
     async def _extract_metadata(self, page) -> DirectPostMetadata:

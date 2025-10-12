@@ -36,24 +36,24 @@ class SelectorStrategy(NamedTuple):
 
 MAIN_IMAGE_SELECTORS: List[SelectorStrategy] = [
     SelectorStrategy(
-        selector='main[role="main"] img[alt]:not([alt*="profile picture"])',
+        selector='img[src*="cdninstagram.com"]:not([alt*="profile picture"])',
         tier=1,
-        comment="Semantic: main tag + descriptive alt, excludes profile pics (most stable)"
+        comment="Direct CDN match: Instagram's actual image CDN (from HTML analysis)"
+    ),
+    SelectorStrategy(
+        selector='main[role="main"] img[alt]:not([alt*="profile picture"])',
+        tier=2,
+        comment="Semantic: main tag + descriptive alt, excludes profile pics (stable fallback)"
     ),
     SelectorStrategy(
         selector='img[crossorigin][src]:not([alt*="profile picture"])',
-        tier=2,
+        tier=3,
         comment="Attribute: crossorigin attribute indicates content image, not UI chrome"
     ),
     SelectorStrategy(
         selector='div[style*="padding-bottom"] > img[src]',
-        tier=3,
-        comment="Structural: Instagram uses padding-bottom for aspect-ratio containers"
-    ),
-    SelectorStrategy(
-        selector='main img[src]',
         tier=4,
-        comment="Fallback: any image in main (risky, may pick wrong image)"
+        comment="Structural: Instagram uses padding-bottom for aspect-ratio containers"
     ),
 ]
 
@@ -85,6 +85,19 @@ CAROUSEL_PREV_SELECTORS: List[SelectorStrategy] = [
         selector='[role="button"][aria-label="Go back"]',
         tier=2,
         comment="Role-based alternative"
+    ),
+]
+
+CAROUSEL_INDICATORS_SELECTORS: List[SelectorStrategy] = [
+    SelectorStrategy(
+        selector='div._acnb',
+        tier=1,
+        comment="Carousel dots/indicators (from HTML analysis - fastest detection)"
+    ),
+    SelectorStrategy(
+        selector='div[class*="acn"]',
+        tier=2,
+        comment="Partial class match for carousel indicators (fallback)"
     ),
 ]
 
@@ -308,6 +321,7 @@ __all__ = [
     'MAIN_IMAGE_SELECTORS',
     'CAROUSEL_NEXT_SELECTORS',
     'CAROUSEL_PREV_SELECTORS',
+    'CAROUSEL_INDICATORS_SELECTORS',
     'USERNAME_SELECTORS',
     'VERIFIED_BADGE_SELECTORS',
     'TIMESTAMP_SELECTOR',

@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import requests
 from playwright.async_api import async_playwright
 
+from ...utils.browser import launch_browser_smart
 from ..base_extractor import (
     BaseExtractor, logger,
     ExtractorError, TemporaryError, PermanentError,
@@ -86,7 +87,9 @@ class TwitterCoreMixin:
             browser = None
             try:
                 # Launch browser with anti-detection settings for X.com
-                browser = await p.chromium.launch(
+                browser = await launch_browser_smart(
+                    p,
+                    browser_type="chromium",
                     headless=True,
                     args=[
                         '--no-sandbox',
