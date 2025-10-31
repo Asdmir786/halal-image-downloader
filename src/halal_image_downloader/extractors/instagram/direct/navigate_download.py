@@ -88,6 +88,12 @@ class DirectNavigateDownloadMixin(DirectMediaMixin, DirectOverlaysMixin):
             dest.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
+        # Append timestamp suffix to avoid filename collisions (YYYYMMDDHH)
+        try:
+            ts = datetime.now().strftime("%Y%m%d%H")
+            dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
+        except Exception:
+            pass
         return dest
 
     def _build_filename(self, meta: DirectPostMetadata, index: Optional[int] = None, total: Optional[int] = None, image_url: Optional[str] = None) -> str:

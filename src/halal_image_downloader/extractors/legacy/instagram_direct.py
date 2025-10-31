@@ -644,6 +644,12 @@ class InstagramDirectExtractor(BaseExtractor):
             dest.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
+        # Append timestamp suffix to avoid filename collisions (YYYYMMDDHH)
+        try:
+            ts = datetime.now().strftime("%Y%m%d%H")
+            dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
+        except Exception:
+            pass
         return dest
 
     async def _navigate_and_collect(self, page, url: str) -> tuple[DirectPostMetadata, List[Dict[str, Optional[str]]]]:

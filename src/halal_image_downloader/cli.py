@@ -920,6 +920,13 @@ def rename_saveclip_files_with_metadata(downloaded_files: List[Path], metadata, 
                 total=total if total > 1 else None,
                 image_url=None,
             )
+            # Append timestamp suffix to avoid filename collisions (YYYYMMDDHH)
+            try:
+                ts = time.strftime("%Y%m%d%H")
+                new_path = new_path.with_name(f"{new_path.stem}_{ts}{new_path.suffix}")
+            except Exception:
+                # If timestamp formatting fails for any reason, proceed without suffix
+                pass
             # Keep files in same directory if template produced a different dir than current
             if new_path.parent != old_path.parent and str(new_path).startswith(str(old_path.parent)):
                 pass  # already under same root

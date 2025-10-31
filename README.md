@@ -2,7 +2,7 @@
 
 A command-line tool for fast and reliable image downloading from supported social media sources.
 
-[![Version](https://img.shields.io/badge/version-2025.10.13-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
+[![Version](https://img.shields.io/badge/version-2025.10.31-blue.svg)](https://github.com/Asdmir786/halal-image-downloader)
 [![PyPI](https://img.shields.io/pypi/v/halal-image-downloader.svg)](https://pypi.org/project/halal-image-downloader/)
 [![Python](https://img.shields.io/badge/python-3.11%2B%20(tested%203.14)-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](LICENSE)

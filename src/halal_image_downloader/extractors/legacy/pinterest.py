@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
+from datetime import datetime
 
 from .base_extractor import (
     BaseExtractor, logger,
@@ -412,7 +413,10 @@ class PinterestExtractor(BaseExtractor):
             m = re.search(r'\.([a-zA-Z0-9]{3,4})(?:\?|$)', url_)
             if m:
                 ext = m.group(1).lower()
-            filename = f"{pin_id}_{idx}.{ext}" if len(collected) > 1 else f"{pin_id}.{ext}"
+            # Append timestamp suffix (YYYYMMDDHH) to avoid collisions
+            ts = datetime.now().strftime("%Y%m%d%H")
+            base_name = f"{pin_id}_{idx}" if len(collected) > 1 else f"{pin_id}"
+            filename = f"{base_name}_{ts}.{ext}"
             results.append({
                 'url': url_,
                 'filename': filename,
